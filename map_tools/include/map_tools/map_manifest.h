@@ -42,6 +42,7 @@ struct MapManifest
   std::string created_at;
   std::string config_hash;
   std::string keyframe_index;
+  std::string keyframe_index_checksum;
   std::vector<LevelBand> levels;
   std::vector<TileRecord> tiles;
 };

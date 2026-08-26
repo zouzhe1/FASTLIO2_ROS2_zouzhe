@@ -24,6 +24,7 @@ std::string serializeManifest(const MapManifest & manifest)
   out << YAML::Key << "created_at" << YAML::Value << manifest.created_at;
   out << YAML::Key << "config_hash" << YAML::Value << manifest.config_hash;
   out << YAML::Key << "keyframe_index" << YAML::Value << manifest.keyframe_index;
+  out << YAML::Key << "keyframe_index_checksum" << YAML::Value << manifest.keyframe_index_checksum;
   out << YAML::Key << "levels" << YAML::Value << YAML::BeginSeq;
   for (const auto & level : manifest.levels) {
     out << YAML::BeginMap << YAML::Key << "id" << YAML::Value << level.id
@@ -63,6 +64,7 @@ MapManifest parseManifest(const std::string & yaml_text)
   manifest.created_at = root["created_at"].as<std::string>();
   manifest.config_hash = root["config_hash"].as<std::string>();
   manifest.keyframe_index = root["keyframe_index"].as<std::string>();
+  manifest.keyframe_index_checksum = root["keyframe_index_checksum"].as<std::string>();
   for (const auto & node : root["levels"]) {
     manifest.levels.push_back({
       node["id"].as<std::string>(), node["z_min"].as<double>(), node["z_max"].as<double>()});
@@ -118,6 +120,7 @@ ValidationResult validateManifest(
   if (manifest.frame_id != expected_frame) return fail("frame mismatch");
   if (manifest.tile_size_m <= 0.0) return fail("invalid tile size");
   if (manifest.keyframe_index.empty()) return fail("keyframe index is required");
+  if (manifest.keyframe_index_checksum.empty()) return fail("keyframe index checksum is required");
   const auto safe_relative = [](const std::filesystem::path & path) {
     if (path.empty() || path.is_absolute()) return false;
     return std::none_of(path.begin(), path.end(), [](const auto & part) {return part == "..";});
@@ -125,6 +128,10 @@ ValidationResult validateManifest(
   if (!safe_relative(manifest.keyframe_index)) return fail("unsafe keyframe index path");
   if (!root.empty() && !std::filesystem::is_regular_file(root / manifest.keyframe_index)) {
     return fail("missing keyframe index");
+  }
+  if (!root.empty() && verify_checksums &&
+    fileChecksum(root / manifest.keyframe_index) != manifest.keyframe_index_checksum) {
+    return fail("keyframe index checksum mismatch");
   }
   std::set<std::string> level_ids;
   for (const auto & level : manifest.levels) {

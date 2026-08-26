@@ -14,6 +14,7 @@
 #include <stdexcept>
 #include "pgo/latest_value_slot.h"
 #include "map_tools/transactional_generation.h"
+#include "map_tools/map_manifest.h"
 #include "map_tools/tile_id.h"
 #include "place_recognition/place_index.h"
 #include "pgos/commons.h"
@@ -301,6 +302,7 @@ public:
             while (std::filesystem::exists(root / ("generation-" + std::to_string(generation)))) ++generation;
             map_tools::TransactionalGeneration save(root, generation);
             std::ofstream poses(save.stagingPath() / "poses.txt");
+            std::vector<std::pair<std::string, std::string>> patch_checksums;
             if (!poses) throw std::runtime_error("cannot create poses.txt");
             for (size_t i = 0; i < m_pgo->keyPoses().size(); ++i)
             {
@@ -311,6 +313,8 @@ public:
                     (save.stagingPath() / relative).string(), *m_pgo->keyPoses()[i].body_cloud) != 0)
                     throw std::runtime_error("failed to save patch " + patch_name);
                 save.sealExistingFile(relative);
+                patch_checksums.emplace_back(
+                    relative.generic_string(), map_tools::fileChecksum(save.stagingPath() / relative));
                 const Eigen::Quaterniond q(m_pgo->keyPoses()[i].r_global);
                 const V3D t = m_pgo->keyPoses()[i].t_global;
                 poses << patch_name << " " << t.x() << " " << t.y() << " " << t.z() << " "
@@ -321,6 +325,8 @@ public:
             poses.close();
             save.sealExistingFile("poses.txt");
             save.write("places.yaml", m_place_index.serialize());
+            const std::string place_index_checksum = map_tools::fileChecksum(
+                save.stagingPath() / "places.yaml");
             YAML::Emitter manifest;
             manifest << YAML::BeginMap
                      << YAML::Key << "schema_version" << YAML::Value << 1
@@ -331,7 +337,12 @@ public:
                      << YAML::Key << "level_id" << YAML::Value << m_node_config.level_id
                      << YAML::Key << "keyframe_count" << YAML::Value << m_pgo->keyPoses().size()
                      << YAML::Key << "keyframe_index" << YAML::Value << "places.yaml"
-                     << YAML::EndMap;
+                     << YAML::Key << "keyframe_index_checksum" << YAML::Value << place_index_checksum
+                     << YAML::Key << "patches" << YAML::Value << YAML::BeginSeq;
+            for (const auto & patch : patch_checksums)
+                manifest << YAML::BeginMap << YAML::Key << "file" << YAML::Value << patch.first
+                         << YAML::Key << "checksum" << YAML::Value << patch.second << YAML::EndMap;
+            manifest << YAML::EndSeq << YAML::EndMap;
             save.publish(manifest.c_str());
             response->success = true;
             response->message = "SAVED GENERATION " + std::to_string(generation) +

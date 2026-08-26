@@ -18,6 +18,7 @@ map_tools::MapManifest validManifest()
   manifest.created_at = "2026-08-26T00:00:00Z";
   manifest.config_hash = "cfg";
   manifest.keyframe_index = "places.bin";
+  manifest.keyframe_index_checksum = "idx";
   manifest.levels.push_back({"L1", -1.0, 3.0});
   map_tools::TileRecord tile;
   tile.id = {"L1", -1, 2};
@@ -75,6 +76,9 @@ TEST(MapManifest, RejectsMissingFileAndChecksumMismatchBeforePointLoading)
   manifest.tiles[0].checksum = "wrong";
   EXPECT_FALSE(map_tools::validateManifest(manifest, root, "map", true).ok);
   manifest.tiles[0].checksum = map_tools::fileChecksum(root / manifest.tiles[0].file);
+  manifest.keyframe_index_checksum = map_tools::fileChecksum(root / manifest.keyframe_index);
   EXPECT_TRUE(map_tools::validateManifest(manifest, root, "map", true).ok);
+  std::ofstream(root / manifest.keyframe_index, std::ios::app) << "corrupt";
+  EXPECT_FALSE(map_tools::validateManifest(manifest, root, "map", true).ok);
   fs::remove_all(root);
 }

@@ -49,6 +49,11 @@ int main(int argc, char ** argv)
     if (source_manifest["artifact_type"].as<std::string>() != "keyframe_stream") {
       throw std::runtime_error("source generation is not a keyframe stream");
     }
+    std::map<std::string, std::string> patch_checksums;
+    for (const auto & patch : source_manifest["patches"]) {
+      patch_checksums.emplace(
+        patch["file"].as<std::string>(), patch["checksum"].as<std::string>());
+    }
 
     std::ifstream pose_file(source / "poses.txt");
     std::vector<PoseLine> poses;
@@ -86,7 +91,13 @@ int main(int argc, char ** argv)
     std::uint64_t place_id = 0;
     for (const auto & item : poses) {
       Cloud body, world;
-      if (pcl::io::loadPCDFile<Point>((source / "patches" / item.patch).string(), body) != 0) {
+      const fs::path relative_patch = fs::path("patches") / item.patch;
+      const auto expected_checksum = patch_checksums.find(relative_patch.generic_string());
+      if (expected_checksum == patch_checksums.end() ||
+        map_tools::fileChecksum(source / relative_patch) != expected_checksum->second) {
+        throw std::runtime_error("patch checksum mismatch: " + item.patch);
+      }
+      if (pcl::io::loadPCDFile<Point>((source / relative_patch).string(), body) != 0) {
         throw std::runtime_error("cannot load patch: " + item.patch);
       }
       pcl::transformPointCloud(body, world, item.translation, item.rotation);
@@ -156,6 +167,8 @@ int main(int argc, char ** argv)
     }
     fs::remove_all(work);
     output.write(manifest.keyframe_index, place_index.serialize());
+    manifest.keyframe_index_checksum = map_tools::fileChecksum(
+      output.stagingPath() / manifest.keyframe_index);
     const auto validation = map_tools::validateManifest(manifest, output.stagingPath(), "map", true);
     if (!validation.ok) throw std::runtime_error(validation.reason);
     output.publish(map_tools::serializeManifest(manifest));
