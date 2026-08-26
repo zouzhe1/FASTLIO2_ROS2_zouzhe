@@ -3,6 +3,10 @@ odom_topic: /fastlio2/lio_odom
 map_frame: map
 local_frame: lidar
 update_hz: 1.0
+degraded_after_failures: 2
+lost_after_failures: 5
+trusted_timeout_seconds: 5.0
+recovery_consistent_frames: 3
 
 rough_scan_resolution: 0.25
 rough_map_resolution: 0.25

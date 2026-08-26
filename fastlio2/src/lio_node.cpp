@@ -32,6 +32,7 @@ struct NodeConfig
     std::string world_frame = "lidar";
     bool print_time_cost = false;
     std::string sensor_status_topic = "sensor_status";
+    std::string operational_profile = "mapping";
 };
 struct StateData
 {
@@ -76,6 +77,7 @@ public:
     void loadParameters()
     {
         this->declare_parameter("config_path", "");
+        this->declare_parameter("operational_profile", "mapping");
         std::string config_path;
         this->get_parameter<std::string>("config_path", config_path);
 
@@ -93,6 +95,7 @@ public:
         m_node_config.body_frame = config["body_frame"].as<std::string>();
         m_node_config.world_frame = config["world_frame"].as<std::string>();
         m_node_config.print_time_cost = config["print_time_cost"].as<bool>();
+        this->get_parameter("operational_profile", m_node_config.operational_profile);
 
         m_builder_config.lidar_filter_num = config["lidar_filter_num"].as<int>();
         m_builder_config.lidar_min_range = config["lidar_min_range"].as<double>();
@@ -352,7 +355,7 @@ public:
         status.state = interface::msg::LocalizationStatus::UNINITIALIZED;
         status.global_pose_valid = false;
         status.global_tf_published = false;
-        status.operational_profile = "sensor_frontend";
+        status.operational_profile = m_node_config.operational_profile;
         status.tf_owner = "none";
         status.reason = "sensor_contract:" + m_sensor_config_hash;
         const auto & diagnostics = m_sensor_contract.diagnostics();

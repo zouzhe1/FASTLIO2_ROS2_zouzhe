@@ -1,7 +1,20 @@
 import launch
 import launch_ros.actions
-from launch.substitutions import PathJoinSubstitution
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.substitutions import FindPackageShare
+
+
+def profile_owner(profile):
+    if profile != 'mapping':
+        raise RuntimeError('PGO launch requires operational_profile=mapping')
+    return 'pgo'
+
+
+def _validate_profile(context):
+    profile_owner(LaunchConfiguration('operational_profile').perform(context))
+    return []
+
 
 def generate_launch_description():
     rviz_cfg = PathJoinSubstitution(
@@ -18,13 +31,18 @@ def generate_launch_description():
 
     return launch.LaunchDescription(
         [
+            DeclareLaunchArgument('operational_profile', default_value='mapping'),
+            OpaqueFunction(function=_validate_profile),
             launch_ros.actions.Node(
                 package="fastlio2",
                 namespace="fastlio2",
                 executable="lio_node",
                 name="lio_node",
                 output="screen",
-                parameters=[{"config_path": lio_config_path.perform(launch.LaunchContext())}]
+                parameters=[
+                    {"config_path": lio_config_path.perform(launch.LaunchContext())},
+                    {"operational_profile": LaunchConfiguration('operational_profile')},
+                ]
             ),
             launch_ros.actions.Node(
                 package="pgo",
@@ -32,7 +50,11 @@ def generate_launch_description():
                 executable="pgo_node",
                 name="pgo_node",
                 output="screen",
-                parameters=[{"config_path": pgo_config_path.perform(launch.LaunchContext())}]
+                parameters=[
+                    {"config_path": pgo_config_path.perform(launch.LaunchContext())},
+                    {"operational_profile": LaunchConfiguration('operational_profile')},
+                    {"publish_global_tf": True},
+                ]
             ),
             launch_ros.actions.Node(
                 package="rviz2",

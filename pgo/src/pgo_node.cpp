@@ -12,6 +12,7 @@
 #include <visualization_msgs/msg/marker.hpp>
 #include <queue>
 #include <filesystem>
+#include <stdexcept>
 #include "pgos/commons.h"
 #include "pgos/simple_pgo.h"
 #include "interface/srv/save_maps.hpp"
@@ -27,13 +28,15 @@ struct NodeConfig
     std::string odom_topic = "/lio/odom";
     std::string map_frame = "map";
     std::string local_frame = "lidar";
+    std::string operational_profile = "mapping";
+    bool publish_global_tf = true;
 };
 
 struct NodeState
 {
     std::mutex message_mutex;
     std::queue<CloudWithPose> cloud_buffer;
-    double last_message_time;
+    double last_message_time = -1.0;
 };
 
 class PGONode : public rclcpp::Node
@@ -43,6 +46,10 @@ public:
     {
         RCLCPP_INFO(this->get_logger(), "PGO node started");
         loadParameters();
+        if (m_node_config.operational_profile != "mapping" ||
+            !m_node_config.publish_global_tf)
+            throw std::runtime_error(
+                "pgo_node requires operational_profile=mapping and publish_global_tf=true");
         m_pgo = std::make_shared<SimplePGO>(m_pgo_config);
         rclcpp::QoS qos = rclcpp::QoS(10);
         m_cloud_sub.subscribe(this, m_node_config.cloud_topic, qos.get_rmw_qos_profile());
@@ -59,6 +66,8 @@ public:
     void loadParameters()
     {
         this->declare_parameter("config_path", "");
+        this->declare_parameter("operational_profile", "mapping");
+        this->declare_parameter("publish_global_tf", true);
         std::string config_path;
         this->get_parameter<std::string>("config_path", config_path);
         YAML::Node config = YAML::LoadFile(config_path);
@@ -72,6 +81,8 @@ public:
         m_node_config.odom_topic = config["odom_topic"].as<std::string>();
         m_node_config.map_frame = config["map_frame"].as<std::string>();
         m_node_config.local_frame = config["local_frame"].as<std::string>();
+        this->get_parameter("operational_profile", m_node_config.operational_profile);
+        this->get_parameter("publish_global_tf", m_node_config.publish_global_tf);
 
         m_pgo_config.key_pose_delta_deg = config["key_pose_delta_deg"].as<double>();
         m_pgo_config.key_pose_delta_trans = config["key_pose_delta_trans"].as<double>();
@@ -108,6 +119,8 @@ public:
 
     void sendBroadCastTF(builtin_interfaces::msg::Time &time)
     {
+        if (!m_node_config.publish_global_tf)
+            return;
         geometry_msgs::msg::TransformStamped transformStamped;
         transformStamped.header.frame_id = m_node_config.map_frame;
         transformStamped.child_frame_id = m_node_config.local_frame;
