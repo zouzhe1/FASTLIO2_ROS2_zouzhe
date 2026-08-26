@@ -27,6 +27,8 @@ add_library(localization_core
   src/tf_policy.cpp
   src/tile_cache.cpp
   src/small_gicp_backend.cpp
+  src/registration_quality_gate.cpp
+  src/latest_registration.cpp
 )
 target_include_directories(localization_core
   PUBLIC
@@ -119,6 +121,16 @@ if(BUILD_TESTING)
   ament_add_gtest(test_registration_backend test/test_registration_backend.cpp)
   if(TARGET test_registration_backend)
     target_link_libraries(test_registration_backend localization_core)
+  endif()
+
+  ament_add_gtest(test_registration_quality_gate test/test_registration_quality_gate.cpp)
+  if(TARGET test_registration_quality_gate)
+    target_link_libraries(test_registration_quality_gate localization_core)
+  endif()
+
+  ament_add_gtest(test_latest_registration test/test_latest_registration.cpp)
+  if(TARGET test_latest_registration)
+    target_link_libraries(test_latest_registration localization_core)
   endif()
 
   ament_add_pytest_test(

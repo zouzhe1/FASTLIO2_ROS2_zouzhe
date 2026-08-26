@@ -24,6 +24,8 @@
 #include "localizer/localization_state_machine.h"
 #include "localizer/tf_policy.h"
 #include "localizer/registration_backend.h"
+#include "localizer/latest_registration.h"
+#include "localizer/registration_quality_gate.h"
 #include <yaml-cpp/yaml.h>
 
 using namespace std::chrono_literals;
@@ -59,6 +61,15 @@ struct NodeState
     M3D last_offset_r = M3D::Identity(); // map_localmap_r
     V3D last_offset_t = V3D::Zero();     // map_localmap_t
     M4F initial_guess = M4F::Identity();
+};
+
+struct RegistrationContext
+{
+    M3D local_r = M3D::Identity();
+    V3D local_t = V3D::Zero();
+    builtin_interfaces::msg::Time stamp;
+    Eigen::Isometry3d initial_guess = Eigen::Isometry3d::Identity();
+    bool recovery = false;
 };
 
 class LocalizerNode : public rclcpp::Node
@@ -164,14 +175,78 @@ public:
         m_health.tick(now_seconds);
         if (!m_health.shouldPublishGlobalTf())
             m_last_tf_published = false;
+
+        if (auto completed = m_registration_worker.takeLatest())
+        {
+            const auto & registration = completed->result;
+            const Eigen::Isometry3d correction =
+                m_latest_context.initial_guess.inverse() * registration.transform;
+            localizer::QualityInput quality;
+            quality.converged = registration.converged;
+            quality.rmse = registration.rmse;
+            quality.inliers = registration.inliers;
+            quality.inlier_ratio = registration.inlier_ratio;
+            quality.overlap = registration.overlap;
+            quality.hessian_condition = registration.hessian_condition;
+            quality.correction_translation = correction.translation().norm();
+            quality.correction_rotation_deg =
+                Eigen::AngleAxisd(correction.rotation()).angle() * 57.29577951308232;
+            quality.elapsed_ms = registration.elapsed_ms;
+            quality.tiles_complete = true;
+            quality.ambiguity_margin = m_latest_context.recovery ? 1.0 : 0.0;
+            const auto decision = m_quality_gate.evaluate(
+                quality, m_latest_context.recovery ?
+                localizer::QualityMode::RECOVERY : localizer::QualityMode::TRACKING);
+            m_last_registration = registration;
+            m_last_quality_reason = decision.reason;
+
+            if (decision.accepted)
+            {
+                const M3D map_body_r = registration.transform.rotation();
+                const V3D map_body_t = registration.transform.translation();
+                m_state.last_offset_r = map_body_r * m_latest_context.local_r.transpose();
+                m_state.last_offset_t =
+                    -map_body_r * m_latest_context.local_r.transpose() * m_latest_context.local_t +
+                    map_body_t;
+                if (m_health.state() == localizer::LocalizationHealth::RELOCALIZING)
+                    m_health.acceptRecoveryCandidate();
+                if (m_health.state() == localizer::LocalizationHealth::RECOVERING)
+                {
+                    if (m_health.confirmRecoveryFrame(true, now_seconds))
+                    {
+                        std::lock_guard<std::mutex> lock(m_state.service_mutex);
+                        m_state.localize_success = true;
+                        m_state.service_received = false;
+                    }
+                }
+                else
+                    m_health.acceptTrackingResult(now_seconds);
+            }
+            else if (m_latest_context.recovery)
+            {
+                m_health.failRelocalization();
+                std::lock_guard<std::mutex> lock(m_state.service_mutex);
+                m_state.localize_success = false;
+                m_state.service_received = false;
+            }
+            else
+                m_health.rejectTrackingResult(now_seconds);
+
+            if (m_config.publish_global_tf && m_health.shouldPublishGlobalTf())
+            {
+                sendBroadCastTF(m_latest_context.stamp);
+                m_last_tf_published = true;
+            }
+            else
+                m_last_tf_published = false;
+            publishMapCloud(m_latest_context.stamp);
+        }
+
         if (!m_state.message_received)
             return;
 
         rclcpp::Duration diff = this->now() - m_state.last_send_tf_time;
-
-        bool update_tf = diff.seconds() > (1.0 / m_config.update_hz) && m_state.message_received;
-
-        if (!update_tf)
+        if (diff.seconds() <= (1.0 / m_config.update_hz))
             return;
 
         m_state.last_send_tf_time = this->now();
@@ -206,49 +281,17 @@ public:
 
         Eigen::Isometry3d guess = Eigen::Isometry3d::Identity();
         guess.matrix() = initial_guess.cast<double>();
-        const auto registration = m_registration->align(source_points, guess);
-        const bool result = registration.converged;
-        if (result)
-            initial_guess = registration.transform.matrix().cast<float>();
-        if (result)
-        {
-            M3D map_body_r = initial_guess.block<3, 3>(0, 0).cast<double>();
-            V3D map_body_t = initial_guess.block<3, 1>(0, 3).cast<double>();
-            m_state.last_offset_r = map_body_r * current_local_r.transpose();
-            m_state.last_offset_t = -map_body_r * current_local_r.transpose() * current_local_t + map_body_t;
-            if (m_health.state() == localizer::LocalizationHealth::RELOCALIZING)
-                m_health.acceptRecoveryCandidate();
-            if (m_health.state() == localizer::LocalizationHealth::RECOVERING)
-            {
-                if (m_health.confirmRecoveryFrame(true, now_seconds))
-                {
-                    std::lock_guard<std::mutex> lock(m_state.service_mutex);
-                    m_state.localize_success = true;
-                    m_state.service_received = false;
-                }
-            }
-            else
-                m_health.acceptTrackingResult(now_seconds);
-        }
-        else if (m_health.state() == localizer::LocalizationHealth::RELOCALIZING ||
-                 m_health.state() == localizer::LocalizationHealth::RECOVERING)
-        {
-            m_health.failRelocalization();
-            std::lock_guard<std::mutex> lock(m_state.service_mutex);
-            m_state.localize_success = false;
-            m_state.service_received = false;
-        }
-        else
-            m_health.rejectTrackingResult(now_seconds);
-
-        if (m_config.publish_global_tf && m_health.shouldPublishGlobalTf())
-        {
-            sendBroadCastTF(current_time);
-            m_last_tf_published = true;
-        }
-        else
-            m_last_tf_published = false;
-        publishMapCloud(current_time);
+        m_latest_context = {
+            current_local_r, current_local_t, current_time, guess,
+            m_health.state() == localizer::LocalizationHealth::RELOCALIZING ||
+            m_health.state() == localizer::LocalizationHealth::RECOVERING};
+        const std::uint64_t request_id = ++m_registration_sequence;
+        const auto backend = m_registration;
+        m_registration_worker.submit({
+            request_id,
+            [backend, points = std::move(source_points), guess]() {
+                return backend->align(points, guess);
+            }});
     }
     void syncCB(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud_msg, const nav_msgs::msg::Odometry::ConstSharedPtr &odom_msg)
     {
@@ -368,6 +411,15 @@ public:
         status.operational_profile = m_config.operational_profile;
         status.tf_owner = "localizer";
         status.reason = healthName(m_health.state());
+        if (!m_last_quality_reason.empty())
+            status.reason += ":" + m_last_quality_reason;
+        status.rmse = static_cast<float>(m_last_registration.rmse);
+        status.inliers = static_cast<uint32_t>(m_last_registration.inliers);
+        status.inlier_ratio = static_cast<float>(m_last_registration.inlier_ratio);
+        status.overlap = static_cast<float>(m_last_registration.overlap);
+        status.hessian_condition = static_cast<float>(m_last_registration.hessian_condition);
+        status.registration_ms = static_cast<float>(m_last_registration.elapsed_ms);
+        status.replaced_work_items = m_registration_worker.replacedCount();
         if (m_health.lastTrustedTime() >= 0.0)
         {
             const int64_t trusted_nanoseconds = static_cast<int64_t>(
@@ -423,6 +475,12 @@ private:
     localizer::RegistrationConfig m_registration_config;
     std::shared_ptr<ICPLocalizer> m_localizer;
     std::shared_ptr<localizer::SmallGicpBackend> m_registration;
+    localizer::LatestRegistration m_registration_worker;
+    localizer::RegistrationQualityGate m_quality_gate{{}};
+    RegistrationContext m_latest_context;
+    localizer::RegistrationResult m_last_registration;
+    std::string m_last_quality_reason;
+    std::uint64_t m_registration_sequence = 0;
     message_filters::Subscriber<sensor_msgs::msg::PointCloud2> m_cloud_sub;
     message_filters::Subscriber<nav_msgs::msg::Odometry> m_odom_sub;
     rclcpp::TimerBase::SharedPtr m_timer;

@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <mutex>
 #include <stdexcept>
 
 #include <Eigen/Eigenvalues>
@@ -20,6 +21,7 @@ struct SmallGicpBackend::Impl
   std::shared_ptr<small_gicp::KdTree<small_gicp::PointCloud>> target_tree;
   std::uint64_t target_generation{0};
   std::uint64_t preprocess_count{0};
+  mutable std::mutex mutex;
 };
 
 namespace
@@ -55,6 +57,7 @@ SmallGicpBackend::~SmallGicpBackend() = default;
 void SmallGicpBackend::setTarget(
   const std::vector<Eigen::Vector3d> & points, std::uint64_t generation)
 {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
   if (impl_->target && generation == impl_->target_generation) return;
   const auto bounded = boundedPoints(points, impl_->config.max_target_points);
   if (bounded.empty()) throw std::invalid_argument("registration target is empty");
@@ -68,6 +71,7 @@ RegistrationResult SmallGicpBackend::align(
   const std::vector<Eigen::Vector3d> & source,
   const Eigen::Isometry3d & initial_guess) const
 {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
   RegistrationResult output;
   output.target_generation = impl_->target_generation;
   if (!impl_->target || !impl_->target_tree) {
@@ -129,6 +133,7 @@ RegistrationResult SmallGicpBackend::align(
 
 std::uint64_t SmallGicpBackend::targetPreprocessCount() const
 {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
   return impl_->preprocess_count;
 }
 
