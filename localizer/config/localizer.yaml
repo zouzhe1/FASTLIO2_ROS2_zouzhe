@@ -23,3 +23,12 @@ refine_scan_resolution: 0.1
 refine_map_resolution: 0.1
 refine_max_iteration: 10
 refine_score_thresh: 0.1
+
+registration_backend: small_gicp
+registration_voxel_resolution: 0.20
+registration_max_source_points: 12000
+registration_max_target_points: 120000
+registration_max_iterations: 20
+registration_max_correspondence_distance: 1.0
+registration_threads: 2
+registration_deadline_ms: 80.0

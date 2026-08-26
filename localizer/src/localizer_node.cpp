@@ -1,6 +1,7 @@
 #include <queue>
 #include <mutex>
 #include <filesystem>
+#include <functional>
 #include <algorithm>
 #include <cstdint>
 #include <stdexcept>
@@ -22,6 +23,7 @@
 #include "interface/msg/localization_status.hpp"
 #include "localizer/localization_state_machine.h"
 #include "localizer/tf_policy.h"
+#include "localizer/registration_backend.h"
 #include <yaml-cpp/yaml.h>
 
 using namespace std::chrono_literals;
@@ -87,6 +89,7 @@ public:
         m_sync->setAgePenalty(0.1);
         m_sync->registerCallback(std::bind(&LocalizerNode::syncCB, this, std::placeholders::_1, std::placeholders::_2));
         m_localizer = std::make_shared<ICPLocalizer>(m_localizer_config);
+        m_registration = std::make_shared<localizer::SmallGicpBackend>(m_registration_config);
 
         m_reloc_srv = this->create_service<interface::srv::Relocalize>("relocalize", std::bind(&LocalizerNode::relocCB, this, std::placeholders::_1, std::placeholders::_2));
 
@@ -140,6 +143,20 @@ public:
         m_localizer_config.refine_map_resolution = config["refine_map_resolution"].as<double>();
         m_localizer_config.refine_max_iteration = config["refine_max_iteration"].as<int>();
         m_localizer_config.refine_score_thresh = config["refine_score_thresh"].as<double>();
+        if (config["registration_voxel_resolution"])
+            m_registration_config.voxel_resolution = config["registration_voxel_resolution"].as<double>();
+        if (config["registration_max_source_points"])
+            m_registration_config.max_source_points = config["registration_max_source_points"].as<size_t>();
+        if (config["registration_max_target_points"])
+            m_registration_config.max_target_points = config["registration_max_target_points"].as<size_t>();
+        if (config["registration_max_iterations"])
+            m_registration_config.max_iterations = config["registration_max_iterations"].as<int>();
+        if (config["registration_max_correspondence_distance"])
+            m_registration_config.max_correspondence_distance = config["registration_max_correspondence_distance"].as<double>();
+        if (config["registration_threads"])
+            m_registration_config.num_threads = config["registration_threads"].as<int>();
+        if (config["registration_deadline_ms"])
+            m_registration_config.deadline_ms = config["registration_deadline_ms"].as<double>();
     }
     void timerCB()
     {
@@ -176,15 +193,23 @@ public:
         M3D current_local_r;
         V3D current_local_t;
         builtin_interfaces::msg::Time current_time;
+        std::vector<Eigen::Vector3d> source_points;
         {
             std::lock_guard<std::mutex>(m_state.message_mutex);
             current_local_r = m_state.last_r;
             current_local_t = m_state.last_t;
             current_time = m_state.last_message_time;
-            m_localizer->setInput(m_state.last_cloud);
+            source_points.reserve(m_state.last_cloud->size());
+            for (const auto & point : *m_state.last_cloud)
+                source_points.emplace_back(point.x, point.y, point.z);
         }
 
-        bool result = m_localizer->align(initial_guess);
+        Eigen::Isometry3d guess = Eigen::Isometry3d::Identity();
+        guess.matrix() = initial_guess.cast<double>();
+        const auto registration = m_registration->align(source_points, guess);
+        const bool result = registration.converged;
+        if (result)
+            initial_guess = registration.transform.matrix().cast<float>();
         if (result)
         {
             M3D map_body_r = initial_guess.block<3, 3>(0, 0).cast<double>();
@@ -299,6 +324,11 @@ public:
             response->message = "localizer is not ready to start relocalization";
             return;
         }
+        std::vector<Eigen::Vector3d> target_points;
+        target_points.reserve(m_localizer->refineMap()->size());
+        for (const auto & point : *m_localizer->refineMap())
+            target_points.emplace_back(point.x, point.y, point.z);
+        m_registration->setTarget(target_points, std::hash<std::string>{}(pcd_path));
 
         {
             std::lock_guard<std::mutex> lock(m_state.service_mutex);
@@ -390,7 +420,9 @@ private:
     NodeState m_state;
 
     ICPConfig m_localizer_config;
+    localizer::RegistrationConfig m_registration_config;
     std::shared_ptr<ICPLocalizer> m_localizer;
+    std::shared_ptr<localizer::SmallGicpBackend> m_registration;
     message_filters::Subscriber<sensor_msgs::msg::PointCloud2> m_cloud_sub;
     message_filters::Subscriber<nav_msgs::msg::Odometry> m_odom_sub;
     rclcpp::TimerBase::SharedPtr m_timer;

@@ -19,11 +19,14 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(interface REQUIRED)
 find_package(map_tools REQUIRED)
+find_package(small_gicp_vendor REQUIRED)
+find_package(small_gicp REQUIRED)
 
 add_library(localization_core
   src/localization_state_machine.cpp
   src/tf_policy.cpp
   src/tile_cache.cpp
+  src/small_gicp_backend.cpp
 )
 target_include_directories(localization_core
   PUBLIC
@@ -31,6 +34,7 @@ target_include_directories(localization_core
     $<INSTALL_INTERFACE:include>
 )
 ament_target_dependencies(localization_core map_tools)
+target_link_libraries(localization_core small_gicp::small_gicp)
 
 if(LOCALIZER_BUILD_NODE)
 find_package(std_msgs REQUIRED)
@@ -110,6 +114,11 @@ if(BUILD_TESTING)
   ament_add_gtest(test_tile_cache test/test_tile_cache.cpp)
   if(TARGET test_tile_cache)
     target_link_libraries(test_tile_cache localization_core)
+  endif()
+
+  ament_add_gtest(test_registration_backend test/test_registration_backend.cpp)
+  if(TARGET test_registration_backend)
+    target_link_libraries(test_registration_backend localization_core)
   endif()
 
   ament_add_pytest_test(
