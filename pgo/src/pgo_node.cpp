@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <stdexcept>
 #include "pgo/latest_value_slot.h"
+#include "map_tools/transactional_generation.h"
 #include "pgos/commons.h"
 #include "pgos/simple_pgo.h"
 #include "interface/srv/save_maps.hpp"
@@ -30,6 +31,8 @@ struct NodeConfig
     std::string local_frame = "lidar";
     std::string operational_profile = "mapping";
     bool publish_global_tf = true;
+    std::string map_id = "fastlio2-map";
+    std::string level_id = "L0";
 };
 
 struct NodeState
@@ -73,6 +76,8 @@ public:
         this->declare_parameter("config_path", "");
         this->declare_parameter("operational_profile", "mapping");
         this->declare_parameter("publish_global_tf", true);
+        this->declare_parameter("map_id", "fastlio2-map");
+        this->declare_parameter("level_id", "L0");
         std::string config_path;
         this->get_parameter<std::string>("config_path", config_path);
         YAML::Node config = YAML::LoadFile(config_path);
@@ -88,6 +93,8 @@ public:
         m_node_config.local_frame = config["local_frame"].as<std::string>();
         this->get_parameter("operational_profile", m_node_config.operational_profile);
         this->get_parameter("publish_global_tf", m_node_config.publish_global_tf);
+        this->get_parameter("map_id", m_node_config.map_id);
+        this->get_parameter("level_id", m_node_config.level_id);
 
         m_pgo_config.key_pose_delta_deg = config["key_pose_delta_deg"].as<double>();
         m_pgo_config.key_pose_delta_trans = config["key_pose_delta_trans"].as<double>();
@@ -264,52 +271,53 @@ public:
             return;
         }
 
-        std::filesystem::path p_dir(request->file_path);
-        std::filesystem::path patches_dir = p_dir / "patches";
-        std::filesystem::path poses_txt_path = p_dir / "poses.txt";
-        std::filesystem::path map_path = p_dir / "map.pcd";
-
-        if (request->save_patches)
+        try
         {
-            if (std::filesystem::exists(patches_dir))
+            const std::filesystem::path root(request->file_path);
+            std::uint64_t generation = 1;
+            try { generation = map_tools::readCurrentGeneration(root) + 1; } catch (...) {}
+            while (std::filesystem::exists(root / ("generation-" + std::to_string(generation)))) ++generation;
+            map_tools::TransactionalGeneration save(root, generation);
+            std::ofstream poses(save.stagingPath() / "poses.txt");
+            if (!poses) throw std::runtime_error("cannot create poses.txt");
+            for (size_t i = 0; i < m_pgo->keyPoses().size(); ++i)
             {
-                std::filesystem::remove_all(patches_dir);
+                const std::string patch_name = std::to_string(i) + ".pcd";
+                const std::filesystem::path relative = std::filesystem::path("patches") / patch_name;
+                std::filesystem::create_directories((save.stagingPath() / relative).parent_path());
+                if (pcl::io::savePCDFileBinary(
+                    (save.stagingPath() / relative).string(), *m_pgo->keyPoses()[i].body_cloud) != 0)
+                    throw std::runtime_error("failed to save patch " + patch_name);
+                save.sealExistingFile(relative);
+                const Eigen::Quaterniond q(m_pgo->keyPoses()[i].r_global);
+                const V3D t = m_pgo->keyPoses()[i].t_global;
+                poses << patch_name << " " << t.x() << " " << t.y() << " " << t.z() << " "
+                      << q.w() << " " << q.x() << " " << q.y() << " " << q.z() << "\n";
             }
-
-            std::filesystem::create_directories(patches_dir);
-
-            if (std::filesystem::exists(poses_txt_path))
-            {
-                std::filesystem::remove(poses_txt_path);
-            }
-            RCLCPP_INFO(this->get_logger(), "Patches Path: %s", patches_dir.string().c_str());
+            poses.flush();
+            if (!poses) throw std::runtime_error("failed to write poses.txt");
+            poses.close();
+            save.sealExistingFile("poses.txt");
+            YAML::Emitter manifest;
+            manifest << YAML::BeginMap
+                     << YAML::Key << "schema_version" << YAML::Value << 1
+                     << YAML::Key << "artifact_type" << YAML::Value << "keyframe_stream"
+                     << YAML::Key << "map_id" << YAML::Value << m_node_config.map_id
+                     << YAML::Key << "generation" << YAML::Value << generation
+                     << YAML::Key << "frame_id" << YAML::Value << m_node_config.map_frame
+                     << YAML::Key << "level_id" << YAML::Value << m_node_config.level_id
+                     << YAML::Key << "keyframe_count" << YAML::Value << m_pgo->keyPoses().size()
+                     << YAML::EndMap;
+            save.publish(manifest.c_str());
+            response->success = true;
+            response->message = "SAVED GENERATION " + std::to_string(generation) +
+                "; RUN tile_builder_node OFFLINE BEFORE LOCALIZATION";
         }
-        RCLCPP_INFO(this->get_logger(), "SAVE MAP TO %s", map_path.string().c_str());
-
-        std::ofstream txt_file(poses_txt_path);
-
-        CloudType::Ptr ret(new CloudType);
-        for (size_t i = 0; i < m_pgo->keyPoses().size(); i++)
+        catch (const std::exception & error)
         {
-
-            CloudType::Ptr body_cloud = m_pgo->keyPoses()[i].body_cloud;
-            if (request->save_patches)
-            {
-                std::string patch_name = std::to_string(i) + ".pcd";
-                std::filesystem::path patch_path = patches_dir / patch_name;
-                pcl::io::savePCDFileBinary(patch_path.string(), *body_cloud);
-                Eigen::Quaterniond q(m_pgo->keyPoses()[i].r_global);
-                V3D t = m_pgo->keyPoses()[i].t_global;
-                txt_file << patch_name << " " << t.x() << " " << t.y() << " " << t.z() << " " << q.w() << " " << q.x() << " " << q.y() << " " << q.z() << std::endl;
-            }
-            CloudType::Ptr world_cloud(new CloudType);
-            pcl::transformPointCloud(*body_cloud, *world_cloud, m_pgo->keyPoses()[i].t_global, Eigen::Quaterniond(m_pgo->keyPoses()[i].r_global));
-            *ret += *world_cloud;
+            response->success = false;
+            response->message = error.what();
         }
-        txt_file.close();
-        pcl::io::savePCDFileBinary(map_path.string(), *ret);
-        response->success = true;
-        response->message = "SAVE SUCCESS!";
     }
 
 private:
