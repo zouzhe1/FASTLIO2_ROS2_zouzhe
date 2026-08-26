@@ -7,6 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(ament_cmake REQUIRED)
 find_package(yaml-cpp REQUIRED)
 find_package(PCL REQUIRED COMPONENTS common io filters)
+find_package(place_recognition REQUIRED)
 
 add_library(map_manifest src/map_manifest.cpp src/transactional_generation.cpp)
 target_include_directories(map_manifest PUBLIC
@@ -25,6 +26,7 @@ target_link_libraries(map_validator map_manifest)
 add_executable(tile_builder_node src/tile_builder_node.cpp)
 target_include_directories(tile_builder_node PRIVATE ${PCL_INCLUDE_DIRS})
 target_link_libraries(tile_builder_node map_manifest ${PCL_LIBRARIES})
+ament_target_dependencies(tile_builder_node place_recognition)
 
 install(TARGETS map_validator tile_builder_node DESTINATION lib/${PROJECT_NAME})
 

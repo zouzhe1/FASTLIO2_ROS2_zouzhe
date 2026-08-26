@@ -14,6 +14,7 @@
 
 #include "map_tools/map_manifest.h"
 #include "map_tools/transactional_generation.h"
+#include "place_recognition/place_index.h"
 
 namespace fs = std::filesystem;
 using Point = pcl::PointXYZI;
@@ -66,6 +67,7 @@ int main(int argc, char ** argv)
     std::map<map_tools::TileId, std::vector<fs::path>> fragments;
     std::size_t buffered_points = 0;
     std::size_t fragment_sequence = 0;
+    place_recognition::PlaceIndex place_index({20, 60, 80.0, 3});
     auto flush = [&]() {
       for (auto & entry : buffers) {
         if (entry.second->empty()) continue;
@@ -81,12 +83,25 @@ int main(int argc, char ** argv)
       buffered_points = 0;
     };
 
+    std::uint64_t place_id = 0;
     for (const auto & item : poses) {
       Cloud body, world;
       if (pcl::io::loadPCDFile<Point>((source / "patches" / item.patch).string(), body) != 0) {
         throw std::runtime_error("cannot load patch: " + item.patch);
       }
       pcl::transformPointCloud(body, world, item.translation, item.rotation);
+      std::vector<place_recognition::Point3> descriptor_points;
+      descriptor_points.reserve(body.size());
+      for (const auto & point : body) descriptor_points.push_back({point.x, point.y, point.z});
+      place_recognition::PlaceMetadata place;
+      place.id = place_id++;
+      place.x = item.translation.x(); place.y = item.translation.y(); place.z = item.translation.z();
+      place.yaw = Eigen::AngleAxisf(item.rotation).axis().z() * Eigen::AngleAxisf(item.rotation).angle();
+      place.level_id = level_id;
+      place.tile_keys = {map_tools::tileForPoint(level_id, place.x, place.y).stableKey()};
+      place.session_id = "offline";
+      place.timestamp = static_cast<double>(place.id);
+      place_index.add(place, descriptor_points);
       for (const auto & point : world) {
         const auto id = map_tools::tileForPoint(level_id, point.x, point.y);
         auto & tile = buffers[id];
@@ -103,6 +118,7 @@ int main(int argc, char ** argv)
     manifest.frame_id = source_manifest["frame_id"].as<std::string>();
     manifest.created_at = "generated-offline";
     manifest.config_hash = "tile-size=25;voxel=" + std::to_string(voxel);
+    manifest.keyframe_index = "places.yaml";
     manifest.levels.push_back({level_id, -1000.0, 1000.0});
     for (const auto & tile_fragments : fragments) {
       Cloud::Ptr merged(new Cloud);
@@ -139,6 +155,7 @@ int main(int argc, char ** argv)
       manifest.tiles.push_back(record);
     }
     fs::remove_all(work);
+    output.write(manifest.keyframe_index, place_index.serialize());
     const auto validation = map_tools::validateManifest(manifest, output.stagingPath(), "map", true);
     if (!validation.ok) throw std::runtime_error(validation.reason);
     output.publish(map_tools::serializeManifest(manifest));

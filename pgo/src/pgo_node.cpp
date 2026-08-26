@@ -14,6 +14,8 @@
 #include <stdexcept>
 #include "pgo/latest_value_slot.h"
 #include "map_tools/transactional_generation.h"
+#include "map_tools/tile_id.h"
+#include "place_recognition/place_index.h"
 #include "pgos/commons.h"
 #include "pgos/simple_pgo.h"
 #include "interface/srv/save_maps.hpp"
@@ -250,6 +252,20 @@ public:
 
         m_pgo->smoothAndUpdate();
 
+        const auto & key_pose = m_pgo->keyPoses().back();
+        place_recognition::PlaceMetadata place;
+        place.id = m_pgo->keyPoses().size() - 1;
+        place.x = key_pose.t_global.x(); place.y = key_pose.t_global.y(); place.z = key_pose.t_global.z();
+        place.level_id = m_node_config.level_id;
+        place.tile_keys = {map_tools::tileForPoint(place.level_id, place.x, place.y).stableKey()};
+        place.session_id = "online";
+        place.timestamp = key_pose.time;
+        std::vector<place_recognition::Point3> descriptor_points;
+        descriptor_points.reserve(key_pose.body_cloud->size());
+        for (const auto & point : *key_pose.body_cloud)
+            descriptor_points.push_back({point.x, point.y, point.z});
+        m_place_index.add(place, descriptor_points);
+
         sendBroadCastTF(cur_time);
 
         publishLoopMarkers(cur_time);
@@ -298,6 +314,7 @@ public:
             if (!poses) throw std::runtime_error("failed to write poses.txt");
             poses.close();
             save.sealExistingFile("poses.txt");
+            save.write("places.yaml", m_place_index.serialize());
             YAML::Emitter manifest;
             manifest << YAML::BeginMap
                      << YAML::Key << "schema_version" << YAML::Value << 1
@@ -307,6 +324,7 @@ public:
                      << YAML::Key << "frame_id" << YAML::Value << m_node_config.map_frame
                      << YAML::Key << "level_id" << YAML::Value << m_node_config.level_id
                      << YAML::Key << "keyframe_count" << YAML::Value << m_pgo->keyPoses().size()
+                     << YAML::Key << "keyframe_index" << YAML::Value << "places.yaml"
                      << YAML::EndMap;
             save.publish(manifest.c_str());
             response->success = true;
@@ -325,6 +343,7 @@ private:
     Config m_pgo_config;
     NodeState m_state;
     pgo::LatestValueSlot<PendingMeasurement> m_pending_measurement;
+    place_recognition::PlaceIndex m_place_index{{20, 60, 80.0, 3}};
     std::shared_ptr<SimplePGO> m_pgo;
     rclcpp::TimerBase::SharedPtr m_timer;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr m_loop_marker_pub;

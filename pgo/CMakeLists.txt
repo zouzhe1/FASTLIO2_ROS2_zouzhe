@@ -32,6 +32,7 @@ if(PGO_BUILD_NODE)
   find_package(PCL REQUIRED)
   find_package(yaml-cpp REQUIRED)
   find_package(map_tools REQUIRED)
+  find_package(place_recognition REQUIRED)
 
   # Ubuntu 24.04's GTSAM package exports an unavailable CppUnitLite test target.
   # Locate only the production headers and shared library used by this package.
@@ -49,7 +50,7 @@ if(PGO_BUILD_NODE)
                src/pgos/simple_pgo.cpp)
 
   add_executable(pgo_node src/pgo_node.cpp ${SRC_LIST})
-  ament_target_dependencies(pgo_node rclcpp std_msgs sensor_msgs nav_msgs message_filters pcl_conversions tf2_ros geometry_msgs visualization_msgs interface map_tools)
+  ament_target_dependencies(pgo_node rclcpp std_msgs sensor_msgs nav_msgs message_filters pcl_conversions tf2_ros geometry_msgs visualization_msgs interface map_tools place_recognition)
   target_link_libraries(pgo_node ${PCL_LIBRARIES} ${GTSAM_LIBRARY} yaml-cpp)
 
   install(TARGETS pgo_node DESTINATION lib/${PROJECT_NAME})
