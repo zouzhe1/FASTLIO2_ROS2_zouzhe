@@ -1,22 +1,22 @@
-# Performance tuning
+# 性能调优
 
-Tune with a versioned bag/map/config and change one budget at a time. Recommended order:
+调优时应固定并记录 rosbag、地图、配置文件的版本，每次只调整一项资源限制。建议按以下
+顺序进行：
 
-1. Reduce source/target point budgets or increase voxel size.
-2. Reduce local registration rate while keeping odometry at sensor rate.
-3. Adjust the same-level tile-cache count and byte ceilings; keep the normal 3×3
-   neighborhood resident when memory permits.
-4. Set small_gicp threads to the number that improves measured p95 without starving the
-   estimator; two is the conservative default.
-5. Change place-recognition top-K only after measuring recall and ambiguity; default is 3.
-6. Increase the on-demand recovery deadline only when verified candidates regularly time
-   out and front-end CPU/RSS remain stable.
+1. 减少源点云和目标点云的点数上限，或增大体素尺寸。
+2. 在保持里程计以传感器频率运行的前提下，降低局部配准频率。
+3. 调整同楼层瓦片缓存的数量和字节上限；内存允许时，应让常用的 3×3 邻域保持驻留。
+4. 根据实测的 p95 延迟设置 small_gicp 线程数，避免抢占状态估计器所需的计算资源；
+   默认使用 2 个线程作为保守配置。
+5. 测量召回率和候选歧义后再调整地点识别的 top-K，默认值为 3。
+6. 只有在候选已通过验证但恢复任务经常超时，且前端 CPU 占用和 RSS 保持稳定时，
+   才增加按需恢复的超时时间。
 
-Full/world-map point-cloud publication is disabled by default. Enable it only for short
-diagnostics with a subscriber present. Path and loop markers are capped; raising these
-limits increases serialization and subscriber memory. Do not loosen quality, ambiguity,
-level isolation, correction-jump or LOST/TF safety thresholds merely to improve recall.
+完整地图或全局地图点云默认不发布。仅在确有订阅者且需要短时诊断时启用。路径和回环
+标记数量均设有上限；提高上限会增加序列化开销和订阅端内存占用。
 
-Use `test/benchmark/run_benchmark.py` to record hashes and enforce latency, memory slope,
-recovery and zero-false-trust gates. Synthetic self-test output validates the harness,
-not deployment performance.
+不要仅为提高召回率而放宽定位质量、候选歧义、楼层隔离、位姿修正跳变或 `LOST`/TF
+安全阈值。
+
+使用 `test/benchmark/run_benchmark.py` 记录数据哈希，并检查延迟、内存增长速率、恢复率
+和零错误可信恢复等门槛。合成数据自检只能验证测试框架是否正常，不能代表实际部署性能。

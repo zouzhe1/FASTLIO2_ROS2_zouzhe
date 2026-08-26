@@ -1,16 +1,30 @@
-# Localization acceptance criteria
+# 定位验收条件
 
-Field acceptance requires a versioned ROS 2 bag, map generation, configuration and
-software commit. The primary dataset must cover at least 100,000 m² and 30 minutes,
-including open, repetitive, sparse, dynamic, multi-level and kidnapped/restart cases.
+现场验收必须使用可追溯版本的 ROS 2 rosbag、地图代次、配置文件和软件提交。主要测试
+数据应满足以下要求：
 
-Safety gates are absolute: zero trusted false recoveries, stale TF, cross-level false
-matches, or global TF publications from an invalid state. The run must have zero crash
-or deadlock. Default performance gates are registration p95 ≤ 80 ms and post-warm-up
-RSS slope ≤ 2 MB/min. Recovery success must be at least 90%; deployment-specific
-position/yaw and ATE/RPE limits must be set from surveyed requirements before release.
+- 覆盖面积不少于 100,000 m²；
+- 连续运行时间不少于 30 分钟；
+- 包含开阔、重复结构、稀疏特征、动态干扰、多楼层、绑架恢复和重启恢复场景。
 
-Every report records bag/map/config/software hashes. Relative improvement is useful
-for tuning but cannot waive a safety gate. Missing metrics fail closed. The repository
-currently contains the harness and synthetic tests, not representative field bags;
-therefore field acceptance remains unproven until those artifacts are run.
+以下安全指标必须全部满足：
+
+- 错误结果被系统判定为可信恢复的次数为 0；
+- 失效 TF 的发布次数为 0；
+- 跨楼层错误匹配次数为 0；
+- 全局定位无效时发布全局 TF 的次数为 0；
+- 崩溃和死锁次数为 0。
+
+默认性能指标如下：
+
+- 配准耗时 p95 不超过 80 ms；
+- 预热完成后的 RSS 增长速率不超过 2 MB/min；
+- 重定位恢复成功率不低于 90%。
+
+位置误差、航向角误差以及 ATE/RPE 的具体上限，应在发布前根据项目的实测精度需求确定。
+
+每份验收报告必须记录 rosbag、地图、配置文件和软件版本的哈希值。相对性能提升可以用于
+调优对比，但不能替代任何安全指标。缺少必要指标时，应按验收失败处理。
+
+当前仓库提供验收框架和合成测试，但不包含具有代表性的现场 rosbag；在使用真实数据完成
+上述测试前，不能视为已经通过现场验收。

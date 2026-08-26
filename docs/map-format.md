@@ -1,16 +1,20 @@
-# Level-aware tiled map format
+# 分层瓦片地图格式
 
-The online map is split into 25 m horizontal tiles. Coordinates use mathematical floor,
-so `-0.001 m` belongs to tile `-1`, while `-25.0 m` belongs to tile `-1`. A tile is
-identified by `(level_id, tile_x, tile_y)`; XY coordinates alone never combine floors.
+在线地图按水平方向划分为 25 m × 25 m 的瓦片。坐标到瓦片编号的换算使用数学向下取整，
+因此 `-0.001 m` 和 `-25.0 m` 都属于编号为 `-1` 的瓦片。每个瓦片由
+`(level_id, tile_x, tile_y)` 唯一标识，禁止仅根据 XY 坐标合并不同楼层的数据。
 
-`manifest.yaml` is written last and contains the schema version, map ID, monotonically
-increasing generation, frame, tile size, creation/config hashes, descriptor-index path,
-level z-bands, and one record per tile. Every tile record contains bounds, point count,
-voxel size, relative file path, and checksum (`fnv1a64:` in schema version 1).
+`manifest.yaml` 在地图保存流程的最后写入，包含以下信息：
 
-Localization validates the complete manifest before loading point data. It rejects an
-unsupported schema, frame mismatch, duplicate tile, unknown level, overlapping level
-bands, missing file, or checksum mismatch. Paths are relative to the generation root.
-A map covering 100,000 m² needs roughly 160 occupied 25 m tiles for full coverage;
-only the current same-level neighborhood is loaded online.
+- 格式版本、地图 ID 和单调递增的地图代次；
+- 坐标系、瓦片尺寸、创建哈希和配置哈希；
+- 描述子索引路径与各楼层的 Z 轴范围；
+- 每个瓦片的边界、点数、体素尺寸、相对文件路径和校验和。
+
+格式版本 1 使用 `fnv1a64:` 校验和。所有文件路径均相对于当前地图代次的根目录。
+
+定位器在加载点云数据前会完整校验清单。出现不支持的格式版本、坐标系不匹配、瓦片
+重复、楼层未知、楼层范围重叠、文件缺失或校验和不一致时，地图会被拒绝加载。
+
+完整覆盖 100,000 m² 区域约需 160 个已占用的 25 m 瓦片；在线定位时只加载当前位置
+附近且属于同一楼层的瓦片。
