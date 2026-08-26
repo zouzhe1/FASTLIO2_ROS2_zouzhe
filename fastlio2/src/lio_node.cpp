@@ -4,6 +4,7 @@
 #include <memory>
 #include <iostream>
 #include <chrono>
+#include <stdexcept>
 // #include <filesystem>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/imu.hpp>
@@ -33,6 +34,9 @@ struct NodeConfig
     bool print_time_cost = false;
     std::string sensor_status_topic = "sensor_status";
     std::string operational_profile = "mapping";
+    bool publish_world_cloud = false;
+    std::size_t max_path_poses = 2000;
+    std::size_t path_publish_stride = 5;
 };
 struct StateData
 {
@@ -54,13 +58,16 @@ public:
         RCLCPP_INFO(this->get_logger(), "LIO Node Started");
         loadParameters();
 
-        m_imu_sub = this->create_subscription<sensor_msgs::msg::Imu>(m_node_config.imu_topic, 10, std::bind(&LIONode::imuCB, this, std::placeholders::_1));
-        m_lidar_sub = this->create_subscription<livox_ros_driver2::msg::CustomMsg>(m_node_config.lidar_topic, 10, std::bind(&LIONode::lidarCB, this, std::placeholders::_1));
+        auto sensor_qos = rclcpp::SensorDataQoS().keep_last(5);
+        m_imu_sub = this->create_subscription<sensor_msgs::msg::Imu>(m_node_config.imu_topic, sensor_qos, std::bind(&LIONode::imuCB, this, std::placeholders::_1));
+        m_lidar_sub = this->create_subscription<livox_ros_driver2::msg::CustomMsg>(m_node_config.lidar_topic, sensor_qos, std::bind(&LIONode::lidarCB, this, std::placeholders::_1));
 
-        m_body_cloud_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>("body_cloud", 10000);
-        m_world_cloud_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>("world_cloud", 10000);
-        m_path_pub = this->create_publisher<nav_msgs::msg::Path>("lio_path", 10000);
-        m_odom_pub = this->create_publisher<nav_msgs::msg::Odometry>("lio_odom", 10000);
+        m_body_cloud_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>(
+            "body_cloud", rclcpp::SensorDataQoS().keep_last(2));
+        m_world_cloud_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>(
+            "world_cloud", rclcpp::SensorDataQoS().keep_last(2));
+        m_path_pub = this->create_publisher<nav_msgs::msg::Path>("lio_path", rclcpp::QoS(1).reliable());
+        m_odom_pub = this->create_publisher<nav_msgs::msg::Odometry>("lio_odom", rclcpp::QoS(5).reliable());
         m_sensor_status_pub = this->create_publisher<interface::msg::LocalizationStatus>(
             m_node_config.sensor_status_topic, rclcpp::QoS(1).reliable());
         m_tf_broadcaster = std::make_shared<tf2_ros::TransformBroadcaster>(*this);
@@ -95,6 +102,14 @@ public:
         m_node_config.body_frame = config["body_frame"].as<std::string>();
         m_node_config.world_frame = config["world_frame"].as<std::string>();
         m_node_config.print_time_cost = config["print_time_cost"].as<bool>();
+        if (config["publish_world_cloud"])
+            m_node_config.publish_world_cloud = config["publish_world_cloud"].as<bool>();
+        if (config["max_path_poses"])
+            m_node_config.max_path_poses = config["max_path_poses"].as<std::size_t>();
+        if (config["path_publish_stride"])
+            m_node_config.path_publish_stride = config["path_publish_stride"].as<std::size_t>();
+        if (m_node_config.max_path_poses == 0 || m_node_config.path_publish_stride == 0)
+            throw std::runtime_error("path bounds must be positive");
         this->get_parameter("operational_profile", m_node_config.operational_profile);
 
         m_builder_config.lidar_filter_num = config["lidar_filter_num"].as<int>();
@@ -280,6 +295,8 @@ public:
 
     void publishPath(rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub, std::string frame_id, const double &time)
     {
+        if (++m_path_publish_counter % m_node_config.path_publish_stride != 0)
+            return;
         if (path_pub->get_subscription_count() <= 0)
             return;
         geometry_msgs::msg::PoseStamped pose;
@@ -294,6 +311,11 @@ public:
         pose.pose.orientation.z = q.z();
         pose.pose.orientation.w = q.w();
         m_state_data.path.poses.push_back(pose);
+        if (m_state_data.path.poses.size() > m_node_config.max_path_poses)
+            m_state_data.path.poses.erase(
+                m_state_data.path.poses.begin(),
+                m_state_data.path.poses.begin() +
+                (m_state_data.path.poses.size() - m_node_config.max_path_poses));
         path_pub->publish(m_state_data.path);
     }
 
@@ -340,9 +362,13 @@ public:
 
         publishCloud(m_body_cloud_pub, body_cloud, m_node_config.body_frame, m_package.cloud_end_time);
 
-        CloudType::Ptr world_cloud = m_builder->lidar_processor()->transformCloud(m_package.cloud, m_builder->lidar_processor()->r_wl(), m_builder->lidar_processor()->t_wl());
-
-        publishCloud(m_world_cloud_pub, world_cloud, m_node_config.world_frame, m_package.cloud_end_time);
+        if (m_node_config.publish_world_cloud && m_world_cloud_pub->get_subscription_count() > 0)
+        {
+            CloudType::Ptr world_cloud = m_builder->lidar_processor()->transformCloud(
+                m_package.cloud, m_builder->lidar_processor()->r_wl(),
+                m_builder->lidar_processor()->t_wl());
+            publishCloud(m_world_cloud_pub, world_cloud, m_node_config.world_frame, m_package.cloud_end_time);
+        }
 
         publishPath(m_path_pub, m_node_config.world_frame, m_package.cloud_end_time);
     }
@@ -377,6 +403,7 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr m_body_cloud_pub;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr m_world_cloud_pub;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr m_path_pub;
+    std::size_t m_path_publish_counter = 0;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr m_odom_pub;
     rclcpp::Publisher<interface::msg::LocalizationStatus>::SharedPtr m_sensor_status_pub;
 

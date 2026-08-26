@@ -3,6 +3,9 @@ lidar_topic: /livox/lidar
 body_frame: body
 world_frame: lidar
 print_time_cost: false
+publish_world_cloud: false
+max_path_poses: 2000
+path_publish_stride: 5
 
 # Livox raw IMU acceleration is reported in g. Use 1.0 for sources already
 # publishing SI acceleration in m/s^2.

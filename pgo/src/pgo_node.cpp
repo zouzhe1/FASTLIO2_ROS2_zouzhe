@@ -35,6 +35,7 @@ struct NodeConfig
     bool publish_global_tf = true;
     std::string map_id = "fastlio2-map";
     std::string level_id = "L0";
+    std::size_t max_visualized_loops = 500;
 };
 
 struct NodeState
@@ -61,10 +62,11 @@ public:
             throw std::runtime_error(
                 "pgo_node requires operational_profile=mapping and publish_global_tf=true");
         m_pgo = std::make_shared<SimplePGO>(m_pgo_config);
-        rclcpp::QoS qos = rclcpp::QoS(10);
+        rclcpp::QoS qos = rclcpp::SensorDataQoS().keep_last(5);
         m_cloud_sub.subscribe(this, m_node_config.cloud_topic, qos.get_rmw_qos_profile());
         m_odom_sub.subscribe(this, m_node_config.odom_topic, qos.get_rmw_qos_profile());
-        m_loop_marker_pub = this->create_publisher<visualization_msgs::msg::MarkerArray>("/pgo/loop_markers", 10000);
+        m_loop_marker_pub = this->create_publisher<visualization_msgs::msg::MarkerArray>(
+            "/pgo/loop_markers", rclcpp::QoS(1).best_effort());
         m_tf_broadcaster = std::make_shared<tf2_ros::TransformBroadcaster>(*this);
         m_sync = std::make_shared<message_filters::Synchronizer<message_filters::sync_policies::ApproximateTime<sensor_msgs::msg::PointCloud2, nav_msgs::msg::Odometry>>>(message_filters::sync_policies::ApproximateTime<sensor_msgs::msg::PointCloud2, nav_msgs::msg::Odometry>(10), m_cloud_sub, m_odom_sub);
         m_sync->setAgePenalty(0.1);
@@ -93,6 +95,8 @@ public:
         m_node_config.odom_topic = config["odom_topic"].as<std::string>();
         m_node_config.map_frame = config["map_frame"].as<std::string>();
         m_node_config.local_frame = config["local_frame"].as<std::string>();
+        if (config["max_visualized_loops"])
+            m_node_config.max_visualized_loops = config["max_visualized_loops"].as<std::size_t>();
         this->get_parameter("operational_profile", m_node_config.operational_profile);
         this->get_parameter("publish_global_tf", m_node_config.publish_global_tf);
         this->get_parameter("map_id", m_node_config.map_id);
@@ -200,7 +204,9 @@ public:
 
         std::vector<KeyPoseWithCloud> &poses = m_pgo->keyPoses();
         std::vector<std::pair<size_t, size_t>> &pairs = m_pgo->historyPairs();
-        for (size_t i = 0; i < pairs.size(); i++)
+        const size_t first_pair = pairs.size() > m_node_config.max_visualized_loops ?
+            pairs.size() - m_node_config.max_visualized_loops : 0;
+        for (size_t i = first_pair; i < pairs.size(); i++)
         {
             size_t i1 = pairs[i].first;
             size_t i2 = pairs[i].second;

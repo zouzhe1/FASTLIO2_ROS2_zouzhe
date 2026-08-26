@@ -53,6 +53,7 @@ struct NodeConfig
     size_t lost_after_failures = 5;
     double trusted_timeout_seconds = 5.0;
     size_t recovery_consistent_frames = 3;
+    bool publish_map_cloud = false;
 };
 
 struct NodeState
@@ -103,7 +104,7 @@ public:
         health_config.trusted_timeout_seconds = m_config.trusted_timeout_seconds;
         health_config.recovery_consistent_frames = m_config.recovery_consistent_frames;
         m_health = localizer::LocalizationStateMachine(health_config);
-        rclcpp::QoS qos = rclcpp::QoS(10);
+        rclcpp::QoS qos = rclcpp::SensorDataQoS().keep_last(5);
         m_cloud_sub.subscribe(this, m_config.cloud_topic, qos.get_rmw_qos_profile());
         m_odom_sub.subscribe(this, m_config.odom_topic, qos.get_rmw_qos_profile());
 
@@ -124,7 +125,8 @@ public:
             std::bind(&LocalizerNode::handleRelocalizeCancel, this, std::placeholders::_1),
             std::bind(&LocalizerNode::handleRelocalizeAccepted, this, std::placeholders::_1));
 
-        m_map_cloud_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>("map_cloud", 10);
+        m_map_cloud_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>(
+            "map_cloud", rclcpp::QoS(1).best_effort());
         m_status_pub = this->create_publisher<interface::msg::LocalizationStatus>(
             "localization_status", rclcpp::QoS(1).reliable());
 
@@ -454,6 +456,8 @@ public:
             m_config.trusted_timeout_seconds = config["trusted_timeout_seconds"].as<double>();
         if (config["recovery_consistent_frames"])
             m_config.recovery_consistent_frames = config["recovery_consistent_frames"].as<size_t>();
+        if (config["publish_map_cloud"])
+            m_config.publish_map_cloud = config["publish_map_cloud"].as<bool>();
 
         m_localizer_config.rough_scan_resolution = config["rough_scan_resolution"].as<double>();
         m_localizer_config.rough_map_resolution = config["rough_map_resolution"].as<double>();
@@ -776,6 +780,8 @@ public:
     }
     void publishMapCloud(builtin_interfaces::msg::Time &time)
     {
+        if (!m_config.publish_map_cloud)
+            return;
         if (m_map_cloud_pub->get_subscription_count() < 1)
             return;
         CloudType::Ptr map_cloud = m_localizer->refineMap();

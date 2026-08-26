@@ -7,6 +7,7 @@ degraded_after_failures: 2
 lost_after_failures: 5
 trusted_timeout_seconds: 5.0
 recovery_consistent_frames: 3
+publish_map_cloud: false
 
 tile_size_m: 25.0
 tile_neighborhood_radius: 1
