@@ -48,6 +48,9 @@ struct Config
     int ieskf_max_iter = 5;
     bool gravity_align = true;
     bool esti_il = false;
+    bool require_stationary_init = true;
+    double max_init_gyro_stddev = 0.02;
+    double max_init_acc_stddev = 0.15;
     M3D r_il = M3D::Identity();
     V3D t_il = V3D::Zero();
 

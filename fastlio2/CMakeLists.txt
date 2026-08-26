@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.8)
 project(fastlio2)
 
+option(FASTLIO_BUILD_NODE "Build the Livox-backed FASTLIO2 node" ON)
+
 set(CMAKE_BUILD_TYPE "Release")
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
@@ -19,8 +21,16 @@ add_compile_definitions(SOPHUS_USE_BASIC_LOGGING)
 add_definitions(-DMP_EN)
 add_definitions(-DMP_PROC_NUM=2)
 
-# find dependencies
 find_package(ament_cmake REQUIRED)
+
+add_library(sensor_contract src/sensor_contract.cpp)
+target_include_directories(sensor_contract
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+
+if(FASTLIO_BUILD_NODE)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(tf2 REQUIRED)
@@ -30,6 +40,7 @@ find_package(sensor_msgs REQUIRED)
 find_package(livox_ros_driver2 REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(interface REQUIRED)
 
 find_package(OpenMP QUIET)
 find_package(PCL REQUIRED)
@@ -50,8 +61,10 @@ set(SRC_LIST src/map_builder/commons.cpp
              src/utils.cpp)
 
 add_executable(lio_node src/lio_node.cpp ${SRC_LIST})
-ament_target_dependencies(lio_node rclcpp std_msgs tf2 tf2_ros nav_msgs sensor_msgs livox_ros_driver2 pcl_conversions geometry_msgs)
+ament_target_dependencies(lio_node rclcpp std_msgs tf2 tf2_ros nav_msgs sensor_msgs livox_ros_driver2 pcl_conversions geometry_msgs interface)
 target_link_libraries(lio_node
+  sensor_contract
+  Sophus::Sophus
   yaml-cpp
   ${PCL_LIBRARIES}
 )
@@ -62,10 +75,20 @@ install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY rviz DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 
+endif()
 
-
+install(
+  TARGETS sensor_contract
+  EXPORT sensor_contract_targets
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+)
+install(DIRECTORY include/ DESTINATION include)
+ament_export_targets(sensor_contract_targets HAS_LIBRARY_TARGET)
 
 if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
   find_package(ament_lint_auto REQUIRED)
   # the following line skips the linter which checks for copyrights
   # comment the line when a copyright and license is added to all source files
@@ -75,6 +98,11 @@ if(BUILD_TESTING)
   # a copyright and license is added to all source files
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
+
+  ament_add_gtest(test_sensor_contract test/test_sensor_contract.cpp)
+  if(TARGET test_sensor_contract)
+    target_link_libraries(test_sensor_contract sensor_contract)
+  endif()
 endif()
 
 ament_package()
