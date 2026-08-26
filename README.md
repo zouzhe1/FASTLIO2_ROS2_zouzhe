@@ -1,4 +1,4 @@
-# FASTLIO2 ROS2
+# FASTLIO2 ROS2 zouzhe版本
 
 ## zouzhe新增优化功能（2026-08-26）
 1. 增强 LiDAR/IMU 输入检查，支持 IMU 单位配置、时间戳回退、数据间断、异常值检测、静止初始化判断和缓存上限。
@@ -12,15 +12,18 @@
 
 相关文档：[运行模式](docs/operational-profiles.md) · [重定位](docs/relocalization.md) · [地图格式](docs/map-format.md) · [性能调优](docs/performance-tuning.md) · [验收条件](docs/acceptance-criteria.md)
 
+## 运行环境
+1. Ubuntu 24.04
+2. ROS2 Jazzy
+
+---
+# 下面是原说明信息
 ## fork前主要工作
 1. 重构[FASTLIO2](https://github.com/hku-mars/FAST_LIO) 适配ROS2
 2. 添加回环节点，基于位置先验+ICP进行回环检测，基于GTSAM进行位姿图优化
 3. 添加重定位节点，基于由粗到细两阶段ICP进行重定位
 4. 增加一致性地图优化，基于[BLAM](https://github.com/hku-mars/BALM) (小场景地图) 和[HBA](https://github.com/hku-mars/HBA) (大场景地图)
 
-## 环境依赖
-1. Ubuntu 24.04
-2. ROS2 Jazzy
 
 ## 编译依赖
 ```text
