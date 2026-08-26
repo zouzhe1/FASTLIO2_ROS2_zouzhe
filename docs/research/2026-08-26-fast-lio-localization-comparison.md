@@ -123,8 +123,8 @@
 **包含。** 设计文档已经给出以下链路：
 
 - 状态机包含 `UNINITIALIZED -> RELOCALIZING -> RECOVERING -> TRACKING`，以及正常跟踪失败后的 `DEGRADED -> LOST`：[设计文档状态机](../plans/2026-08-26-fastlio2-bounded-resource-p0-p3-design.md#6-localization-health-state-machine)
-- `LOST` 或初始定位时，运行 Scan Context 候选检索、按需鲁棒全局配准和 GICP 精配准；正常 `TRACKING` 不持续运行重型全局路径：[设计文档全局恢复](../plans/2026-08-26-fastlio2-bounded-resource-p0-p3-design.md#73-global-recovery-and-loop-closure)
-- 实施任务 11 已规划双模式重定位、全局配准接口、恢复 worker、候选几何验证、三帧恢复确认和并发限制：[实施计划任务 11](../plans/2026-08-26-fastlio2-bounded-resource-p0-p3-implementation.md#task-11-add-on-demand-global-recovery-and-robust-loop-verification-p3)
+- `LOST` 或初始定位时，先用 Scan Context 取得候选地图关键帧及航向，再加载候选关联的同层瓦片，依次执行粗、精两级 GICP；正常 `TRACKING` 不运行这条全局恢复链路：[设计文档全局恢复](../plans/2026-08-26-fastlio2-bounded-resource-p0-p3-design.md#73-global-recovery-and-loop-closure)
+- 实施任务 11 已规划自动/人工触发、可取消的有界恢复 worker、最佳/次佳歧义门限、候选几何验证和三帧运动一致性确认；只有验收数据证明召回不足时，才评估更重的全局配准后端：[实施计划任务 11](../plans/2026-08-26-fastlio2-bounded-resource-p0-p3-implementation.md#task-11-add-on-demand-global-recovery-and-robust-loop-verification-p3)
 
 该目标能力比对照项目更接近真正的自动重定位。
 

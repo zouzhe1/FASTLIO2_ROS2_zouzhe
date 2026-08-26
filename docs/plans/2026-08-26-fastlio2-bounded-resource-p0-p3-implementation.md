@@ -1,27 +1,27 @@
 # FASTLIO2 Bounded-Resource P0–P3 Optimization Implementation Plan
 
-> Execute this plan task-by-task. Complete each task's focused tests and checkpoint verification before continuing.
+> Execute task-by-task. A task is complete only after its focused tests and checkpoint verification pass.
 
-**Goal:** Build a platform-neutral, bounded-resource FASTLIO2 localization and loop-closure backend that detects loss, rejects unsafe corrections, and recovers globally on maps of at least 100,000 m².
+**Goal:** Build a platform-neutral, bounded-resource LiDAR–IMU localization and loop-closure system that detects loss, rejects unsafe corrections, and can recover on maps of at least 100,000 m².
 
-**Architecture:** Keep FASTLIO2 as an independent smooth odometry front end. Feed admitted keyframes into asynchronous local registration and loop workers backed by a 25 m tiled map, Scan Context candidate retrieval, small_gicp refinement, explicit localization health states, and robust incremental GTSAM factors. Keep heavy global recovery on demand and HBA offline.
+**Target environment:** ROS 2 Jazzy on Ubuntu 24.04, C++17, PCL, Eigen, small_gicp, Scan Context, GTSAM/iSAM2, yaml-cpp, ament tests, and rosbag2.
 
-**Tech Stack:** ROS 2 Jazzy on Ubuntu 24.04, C++17, PCL, Eigen, small_gicp, Scan Context, GTSAM/iSAM2, yaml-cpp, ament_cmake_gtest, rosbag2.
+**System boundary:** FASTLIO2 remains the smooth local odometry front end. Mapping, localization, and offline maintenance are mutually exclusive operational profiles. Online localization uses a level-aware 25 m tiled map, bounded caches, asynchronous registration, explicit health states, and one global-TF owner.
 
 ---
 
 ## Execution Preconditions
 
-Run implementation in a dedicated worktree on a `bobo/` branch. Commands below assume this repository is inside a ROS 2 workspace at `$FASTLIO_WS/src/FASTLIO2_ROS2` on Ubuntu 24.04 with ROS 2 Jazzy sourced.
+Implement on branch `zouzhe_optimize`. Commands assume the repository is located at `$FASTLIO_WS/src/FASTLIO2_ROS2` and ROS 2 Jazzy has been sourced.
 
-Before every task:
+Before each task:
 
 ```bash
 cd "$FASTLIO_WS"
 source /opt/ros/jazzy/setup.bash
 ```
 
-After every task, run the package-specific tests shown in that task. At P0, P1, P2, and P3 checkpoints, also run:
+At each P0–P3 checkpoint:
 
 ```bash
 colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release
@@ -29,11 +29,16 @@ colcon test --event-handlers console_direct+
 colcon test-result --verbose
 ```
 
-Expected checkpoint result: build succeeds and all tests pass with zero failed tests.
+Record the git commit, configuration hash, map ID/generation, bag hash, CPU utilization, peak RSS, registration latency percentiles, localization state transitions, and acceptance result. Do not tune against an undocumented bag.
 
-### Task 1: Establish Test and Diagnostics Foundations
+---
+
+## P0 — Correctness, Safety, and Observability
+
+### Task 1: Establish Interfaces, Tests, and Jazzy CI
 
 **Files:**
+
 - Modify: `interface/CMakeLists.txt`
 - Modify: `interface/package.xml`
 - Create: `interface/msg/LocalizationStatus.msg`
@@ -44,10 +49,12 @@ Expected checkpoint result: build succeeds and all tests pass with zero failed t
 - Modify: `pgo/package.xml`
 - Create: `localizer/test/test_smoke.cpp`
 - Create: `pgo/test/test_smoke.cpp`
+- Create: `.github/workflows/ros2-jazzy.yml`
 
-**Step 1: Add failing interface-generation expectation**
+**Implementation:**
 
-Create `LocalizationStatus.msg` with the final message shape:
+1. Add `ament_cmake_gtest` and package smoke tests before production changes.
+2. Generate `LocalizationStatus` with, at minimum:
 
 ```text
 uint8 UNINITIALIZED=0
@@ -60,19 +67,42 @@ uint8 RECOVERING=5
 std_msgs/Header header
 uint8 state
 bool global_pose_valid
+bool global_tf_published
+string operational_profile
+string tf_owner
 string reason
+string map_id
+string map_hash
+uint64 map_generation
+builtin_interfaces/Time last_trusted_update
+float32 correction_age_sec
+float32 correction_translation
+float32 correction_rotation_deg
 float32 rmse
 uint32 inliers
 float32 inlier_ratio
 float32 overlap
 float32 hessian_condition
-float32 registration_ms
+float32 ambiguity_margin
+string level_id
+uint64 candidate_id
 uint32 active_tiles
 uint32 cached_tiles
+uint64 cached_bytes
+float32 registration_ms
+uint32 imu_gap_count
+uint32 lidar_gap_count
+uint32 timestamp_regression_count
+uint32 imu_buffer_size
+uint32 lidar_buffer_size
 uint64 replaced_work_items
+uint32 accepted_loop_count
+uint32 rejected_loop_count
+uint32 accepted_relocalization_count
+uint32 rejected_relocalization_count
 ```
 
-Add the message and action to `rosidl_generate_interfaces()` and add `std_msgs` and `geometry_msgs` as dependencies. Use this action shape for long-running recovery:
+3. Add a cancellable `Relocalize.action`:
 
 ```text
 uint8 AUTO=0
@@ -92,884 +122,432 @@ float32 best_score
 float32 elapsed_sec
 ```
 
-Keep the existing `Relocalize` service as a compatibility request-acceptance interface. The action reports search progress, cancellation, timeout, and the final trusted-pose result without blocking a service callback.
+4. Add `std_msgs`, `builtin_interfaces`, `geometry_msgs`, and action-generation dependencies explicitly to the interface package.
+5. Retain the existing relocalization service only as a compatibility endpoint that reports request acceptance; use the action for completion, cancellation, and feedback.
+6. Add an Ubuntu 24.04/Jazzy amd64 build-and-test workflow. Run target-platform performance tests separately when no representative CI runner is available.
 
-**Step 2: Add minimal failing package smoke tests**
+**Focused verification:** Interface generation succeeds; message/action types import; smoke tests execute under `colcon test`; the workflow contains no obsolete ROS distribution.
 
-Each package test should include its primary public header and contain one test named `PackageSmoke.HeadersCompile`. Add `ament_cmake_gtest` under `BUILD_TESTING`.
+**Commit:** `test: establish localization interfaces and jazzy CI`
 
-**Step 3: Run the tests and confirm the expected initial failure**
-
-```bash
-colcon build --packages-select interface localizer pgo --symlink-install
-```
-
-Expected before CMake/package wiring is complete: message generation or test target configuration fails.
-
-**Step 4: Complete CMake and package dependencies**
-
-Use `rosidl_default_generators` for the message/action and export `rosidl_default_runtime`. On Jazzy, declare every direct dependency in both `package.xml` and CMake rather than relying on transitive dependencies; in particular, add the currently implicit `rclcpp` dependency to localizer and wire `geometry_msgs` for the action. Ensure the test targets link the package libraries introduced by later tasks rather than node executables. Verify sensor subscriptions use publisher-compatible QoS and keep expensive registration outside executor callbacks.
-
-**Step 5: Verify**
-
-```bash
-colcon build --packages-select interface localizer pgo --symlink-install
-colcon test --packages-select interface localizer pgo --event-handlers console_direct+
-colcon test-result --verbose
-```
-
-Expected: build and smoke tests pass.
-
-**Step 6: Commit**
-
-```bash
-git add interface localizer/CMakeLists.txt localizer/package.xml localizer/test pgo/CMakeLists.txt pgo/package.xml pgo/test
-git commit -m "test: establish localization backend test harness"
-```
-
-### Task 2: Fix PGO Timestamp and Latest-Only Input Handling (P0)
+### Task 2: Enforce the LiDAR–IMU Sensor Contract and Bound Input Buffers
 
 **Files:**
-- Create: `pgo/src/pgos/latest_value_slot.h`
-- Create: `pgo/test/test_latest_value_slot.cpp`
-- Modify: `pgo/src/pgo_node.cpp`
 
-**Step 1: Write failing latest-value tests**
+- Modify: `fastlio2/src/lio_node.cpp`
+- Modify: `fastlio2/config/*.yaml`
+- Create: `fastlio2/include/fastlio2/sensor_contract.h`
+- Create: `fastlio2/src/sensor_contract.cpp`
+- Create: `fastlio2/test/test_sensor_contract.cpp`
 
-Cover empty `take()`, one insert, replacement, replacement counter, and concurrent producer/consumer safety. The core assertions are:
+**Implementation:**
 
-```cpp
-LatestValueSlot<int> slot;
-EXPECT_FALSE(slot.take().has_value());
-slot.put(1);
-slot.put(2);
-EXPECT_EQ(slot.replacedCount(), 1U);
-EXPECT_EQ(slot.take().value(), 2);
-EXPECT_FALSE(slot.take().has_value());
-```
+1. Replace the hard-coded accelerometer multiplier with `imu_acc_scale`. Default it to `9.80665` for sources reporting acceleration in g; permit `1.0` for SI-unit sources and document the choice in each sensor profile.
+2. Reject or reset safely on non-finite values, non-positive time deltas, timestamp regression, impossible acceleration/angular velocity, empty scans, and excessive sensor gaps.
+3. Require stationary initialization variance to be below configurable accelerometer and gyro thresholds before declaring initialization valid.
+4. Bound internal deques by both time and count. ROS QoS depth alone does not protect these process-owned buffers.
+5. Publish counters and current sizes through `LocalizationStatus`; log the extrinsic/configuration hash once at startup.
 
-**Step 2: Run the focused test and verify failure**
-
-```bash
-colcon test --packages-select pgo --ctest-args -R test_latest_value_slot --output-on-failure
-```
-
-Expected: compile failure because `LatestValueSlot` does not exist.
-
-**Step 3: Implement the minimal slot**
-
-Implement a mutex-protected `std::optional<T>` with `put(T)`, `take()`, `hasValue()`, and `replacedCount()`. `put()` increments the counter only when replacing pending work.
-
-**Step 4: Replace the PGO queue**
-
-- initialize timestamp state explicitly with `std::optional<double>`;
-- reject out-of-order messages only after a previous timestamp exists;
-- perform keyframe pose admission before `pcl::fromROSMsg`;
-- put only admitted keyframes into `LatestValueSlot<CloudWithPose>`;
-- make `timerCB()` atomically take the newest item;
-- remove lock-free `size()` and `front()` access.
-
-**Step 5: Verify unit tests and build**
-
-```bash
-colcon build --packages-select pgo --symlink-install
-colcon test --packages-select pgo --event-handlers console_direct+
-colcon test-result --verbose
-```
-
-Expected: all PGO tests pass; ThreadSanitizer job, when enabled in CI, reports no queue race.
-
-**Step 6: Commit**
-
-```bash
-git add pgo/src pgo/test
-git commit -m "fix: process only the latest valid PGO keyframe"
-```
-
-### Task 3: Add Explicit Localization State and Correct Lock Ownership (P0)
-
-**Files:**
-- Create: `localizer/src/localizers/localization_state_machine.h`
-- Create: `localizer/src/localizers/localization_state_machine.cpp`
-- Create: `localizer/test/test_localization_state_machine.cpp`
-- Modify: `localizer/src/localizer_node.cpp`
-- Modify: `localizer/config/localizer.yaml`
-
-**Step 1: Write failing transition tests**
-
-Test the configured initial policy:
-
-```cpp
-LocalizationStateMachine sm({2, 5, 5.0, 3});
-EXPECT_EQ(sm.state(), LocalizationState::UNINITIALIZED);
-sm.startRelocalization();
-EXPECT_EQ(sm.state(), LocalizationState::RELOCALIZING);
-sm.onGlobalCandidateAccepted();
-EXPECT_EQ(sm.state(), LocalizationState::RECOVERING);
-sm.onTrustedLocalMatch();
-sm.onTrustedLocalMatch();
-sm.onTrustedLocalMatch();
-EXPECT_EQ(sm.state(), LocalizationState::TRACKING);
-```
-
-Also test weak-match transition, failure timeout, reset, and that one good frame cannot recover from `LOST`.
-
-**Step 2: Verify the tests fail**
-
-```bash
-colcon test --packages-select localizer --ctest-args -R test_localization_state_machine --output-on-failure
-```
-
-Expected: compile failure because the state machine is absent.
-
-**Step 3: Implement the state machine as a pure C++ class**
-
-Do not include ROS types. Inject timestamps as `double` seconds so tests use deterministic time.
-
-**Step 4: Refactor node state ownership**
-
-- use one mutex for service/relocalization requests;
-- use one mutex for the latest synchronized scan/odom snapshot;
-- copy snapshots under lock, then release the lock before point-cloud processing;
-- prevent map reload from racing with registration;
-- publish `LocalizationStatus` every state change and at 1 Hz;
-- make `Relocalize` mean “request accepted/map accepted,” not “pose solved”;
-- serve `Relocalize.action` for complete rough-pose or automatic recovery and support cancellation;
-- optionally subscribe to ROS 2 `/initialpose` as an adapter to the rough-pose action mode;
-- keep `relocalize_check` for compatibility but derive it from the state machine.
-
-**Step 5: Add YAML parameters**
+Suggested parameters:
 
 ```yaml
-state:
-  degraded_after_failures: 2
-  lost_after_failures: 5
-  lost_after_seconds: 5.0
-  recovery_confirm_frames: 3
+sensor:
+  imu_acc_scale: 9.80665
+  max_imu_gap_ms: 20
+  max_lidar_gap_ms: 200
+  max_imu_buffer_seconds: 2.0
+  max_lidar_buffer_frames: 3
+  require_stationary_init: true
+  max_init_gyro_stddev: 0.02
+  max_init_acc_stddev: 0.15
 ```
 
-**Step 6: Verify**
+Tune gap and variance thresholds from recorded sensor rates; do not silently loosen them after a failure.
 
-```bash
-colcon build --packages-select interface localizer --symlink-install
-colcon test --packages-select localizer --event-handlers console_direct+
-colcon test-result --verbose
-```
+**Focused tests:** g-to-SI and SI pass-through; timestamp reset; IMU dropout; saturation; non-finite input; buffer bound; stationary and moving initialization.
 
-Expected: tests pass and node compiles with a single-threaded and multi-threaded executor build configuration.
+**Acceptance:** No unbounded input growth; invalid data cannot produce a fresh trusted global pose; the selected unit profile is observable.
 
-**Step 7: Commit**
+**Commit:** `fix: enforce sensor contract and bounded input buffers`
 
-```bash
-git add interface localizer
-git commit -m "fix: make localization health explicit and thread safe"
-```
-
-### Task 4: Correct PGO Noise Construction and HBA Lifecycle (P0)
+### Task 3: Add Operational Profiles, Localization State, and One TF Owner
 
 **Files:**
-- Create: `pgo/src/pgos/noise_model_factory.h`
-- Create: `pgo/src/pgos/noise_model_factory.cpp`
-- Create: `pgo/test/test_noise_model_factory.cpp`
-- Modify: `pgo/src/pgos/simple_pgo.cpp`
-- Modify: `pgo/src/pgos/simple_pgo.h`
-- Modify: `hba/src/hba_node.cpp`
-- Modify: `hba/src/hba/hba.cpp`
-- Modify: `hba/src/hba/hba.h`
-- Create: `hba/test/test_hba_input.cpp`
-- Modify: `hba/CMakeLists.txt`
-- Modify: `hba/package.xml`
 
-**Step 1: Write failing information-matrix tests**
+- Modify: `fastlio2/launch/*.launch.py`
+- Modify: `localizer/launch/*.launch.py`
+- Modify: `pgo/launch/*.launch.py`
+- Create: `localizer/include/localizer/localization_state_machine.h`
+- Create: `localizer/src/localization_state_machine.cpp`
+- Create: `localizer/test/test_localization_state_machine.cpp`
+- Create: `localizer/test/test_tf_policy.cpp`
+- Create: `test/system/test_tf_owner_launch.py`
 
-Test that a non-symmetric, indefinite, or near-singular input produces a finite symmetric positive-definite matrix after regularization. Test separate rotational/translational fallback variances and robust-kernel selection.
+**Implementation:**
 
-```cpp
-Eigen::Matrix<double, 6, 6> bad = Eigen::Matrix<double, 6, 6>::Zero();
-bad(0, 1) = 10.0;
-auto result = regularizeInformation(bad, config);
-EXPECT_TRUE(result.isApprox(result.transpose(), 1e-9));
-EXPECT_GT(Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double,6,6>>(result)
-              .eigenvalues().minCoeff(), 0.0);
-```
+1. Add a required `operational_profile` launch argument:
+   - `mapping`: FASTLIO2 + PGO; PGO is the global-TF owner; localizer is disabled.
+   - `localization`: FASTLIO2 + tiled localizer; localizer is the global-TF owner; PGO is disabled.
+   - `maintenance`: offline map/HBA tools only; no online global pose claim.
+2. Fail launch validation if zero or multiple nodes are configured to own `map -> odom` in an online profile.
+3. Implement `UNINITIALIZED -> TRACKING -> DEGRADED -> LOST -> RELOCALIZING -> RECOVERING -> TRACKING` using consecutive-frame counters and hysteresis, not one-scan decisions.
+4. Keep local odometry available during `LOST`, but set `global_pose_valid=false`. By default stop publishing fresh `map -> odom`; never republish an old correction with a new timestamp.
+5. Resume trusted global TF only after recovery passes the quality gate and motion-consistency confirmation.
 
-**Step 2: Run and confirm failure**
+**Focused tests:** fake-clock timeout; invalid transitions; hysteresis; LOST TF suppression; stale timestamp prevention; launch tests for each profile and a deliberately conflicting owner configuration.
 
-```bash
-colcon test --packages-select pgo hba --event-handlers console_direct+
-```
+**Acceptance:** Exactly one global-TF owner in every supported online launch; consumers can distinguish local odometry from a valid global pose.
 
-Expected: new tests fail before the factory and reset APIs exist.
+**Commit:** `feat: add explicit localization and tf ownership policy`
 
-**Step 3: Implement calibrated robust loop noise**
-
-- stop using ICP fitness as all six variances;
-- accept a registration Hessian/quality summary when available;
-- symmetrize and eigenvalue-clamp information;
-- provide configured diagonal fallback sigmas;
-- wrap loop noise with Cauchy by default;
-- keep odometry rotation and translation sigmas separate.
-
-**Step 4: Fix HBA lifecycle and graph gauge**
-
-- add `HBA::clear()` and call it before loading a new request;
-- replace external-input `assert` with checked parsing and error responses;
-- clamp hierarchy levels to at least one when input is sufficient;
-- propagate `plane_thresh` into `BLAMConfig`;
-- add a strong but finite prior on the first pose;
-- construct factor information from valid symmetric blocks, never directly from an off-diagonal Hessian block;
-- reject invalid factors with a diagnostic rather than letting GTSAM fail later.
-
-**Step 5: Verify P0 checkpoint**
-
-```bash
-colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release
-colcon test --event-handlers console_direct+
-colcon test-result --verbose
-```
-
-Expected: zero failed tests.
-
-**Step 6: Commit**
-
-```bash
-git add pgo hba
-git commit -m "fix: harden pose graph and offline HBA inputs"
-```
-
-### Task 5: Implement 25 m Tile Indexing and Manifest I/O (P1)
+### Task 4: Fix PGO Work Scheduling and Factor Correctness
 
 **Files:**
-- Create: `localizer/src/localizers/tile_index.h`
-- Create: `localizer/src/localizers/tile_index.cpp`
-- Create: `localizer/src/localizers/tile_manifest.h`
-- Create: `localizer/src/localizers/tile_manifest.cpp`
-- Create: `localizer/test/test_tile_index.cpp`
-- Create: `localizer/test/test_tile_manifest.cpp`
 
-**Step 1: Write failing coordinate tests**
+- Modify: `pgo/src/pgo_node.cpp`
+- Modify: `pgo/src/simple_pgo.cpp`
+- Create: `pgo/include/pgo/latest_value_slot.h`
+- Create: `pgo/test/test_latest_value_slot.cpp`
+- Create: `pgo/test/test_factor_noise.cpp`
 
-Include exact boundaries and negative values:
+**Implementation:**
 
-```cpp
-EXPECT_EQ(tileFor(0.0, 0.0, 25.0), (TileId{0, 0}));
-EXPECT_EQ(tileFor(24.999, 24.999, 25.0), (TileId{0, 0}));
-EXPECT_EQ(tileFor(25.0, 0.0, 25.0), (TileId{1, 0}));
-EXPECT_EQ(tileFor(-0.001, 0.0, 25.0), (TileId{-1, 0}));
-EXPECT_EQ(tileFor(-25.0, -25.0, 25.0), (TileId{-1, -1}));
-```
+1. Replace unlocked check-then-pop access with a mutex-protected latest-value slot. Overwrite stale pending work and increment `replaced_work_items`.
+2. Initialize all timing state explicitly and handle first message/time regression.
+3. Decide keyframe admission from pose/time/distance before converting a full `PointCloud2`.
+4. Give translational and rotational residuals separate, unit-correct variances; use robust noise for verified loop factors.
+5. Avoid recalculating and republishing every optimized pose on every front-end frame; update only after graph changes and publish bounded diagnostics/path history.
 
-Test 3×3 neighbors, deterministic filenames, manifest round trip, version rejection, missing-tile behavior, map-content hash, place-index version, and descriptor-to-tile association validation.
+**Focused tests:** thread sanitizer where available; concurrent producer/consumer; first timestamp; delayed work overwrite; translation/rotation covariance mapping; no graph update on rejected keyframe.
 
-**Step 2: Verify failure**
+**Acceptance:** No queue race or uninitialized time use; graph processing cannot lag indefinitely behind live input.
 
-```bash
-colcon test --packages-select localizer --ctest-args -R "test_tile_(index|manifest)" --output-on-failure
-```
+**Commit:** `fix: make pgo scheduling bounded and factor noise correct`
 
-Expected: compile failure before the tile classes exist.
+### P0 Checkpoint
 
-**Step 3: Implement pure indexing and YAML manifest code**
+Run the full checkpoint commands plus sensor-gap and TF-owner launch tests. P0 passes only when sensor units are explicit, buffers are bounded, LOST cannot masquerade as a valid global pose, and PGO has no known queue race.
 
-Use `std::floor`, signed 32-bit tile coordinates, deterministic ordering, and an explicit manifest schema version. The schema includes map frame, bounds, tile inventory, source-data hash, keyframe/pose inventory, place-index version/hash, and descriptor-to-tile associations. Loading must reject a mismatched map/index pair.
+---
 
-**Step 4: Verify**
+## P1 — Level-Aware Tiled Map and Bounded Memory
 
-```bash
-colcon build --packages-select localizer --symlink-install
-colcon test --packages-select localizer --event-handlers console_direct+
-```
-
-Expected: all tile tests pass.
-
-**Step 5: Commit**
-
-```bash
-git add localizer/src/localizers localizer/test
-git commit -m "feat: add versioned 25 meter map tile indexing"
-```
-
-### Task 6: Add Offline Map Tile Builder (P1)
+### Task 5: Define the 25 m Level-Aware Tile and Manifest Format
 
 **Files:**
-- Create: `localizer/src/map_tile_builder.cpp`
-- Create: `localizer/test/test_map_tile_builder.cpp`
-- Modify: `localizer/CMakeLists.txt`
-- Create: `docs/map-tiling.md`
 
-**Step 1: Write a failing fixture test**
+- Create: `map_tools/CMakeLists.txt`
+- Create: `map_tools/package.xml`
+- Create: `map_tools/include/map_tools/tile_id.h`
+- Create: `map_tools/include/map_tools/map_manifest.h`
+- Create: `map_tools/src/map_manifest.cpp`
+- Create: `map_tools/test/test_tile_id.cpp`
+- Create: `map_tools/test/test_map_manifest.cpp`
+- Create: `docs/map-format.md`
 
-Generate synthetic keyframe patches and poses crossing positive and negative tile boundaries. Run the builder library function into a temporary directory, then assert point ownership, manifest bounds, keyframe poses, descriptor-to-tile associations, version hashes, and that no point appears in two tiles.
+**Implementation:**
 
-**Step 2: Run and verify failure**
-
-```bash
-colcon test --packages-select localizer --ctest-args -R test_map_tile_builder --output-on-failure
-```
-
-Expected: failure because the builder is absent.
-
-**Step 3: Implement the builder**
-
-Provide a ROS-independent library function and a thin CLI. The preferred production input is the mapping output containing `patches/` and `poses.txt`:
+1. Use 25 m horizontal tiles with floor-based indexing for negative coordinates:
 
 ```text
-map_tile_builder --patches saved_map/patches --poses saved_map/poses.txt \
-  --output map_directory --tile-size 25 \
-  --rough-resolution 0.5 --fine-resolution 0.2
+tile_x = floor(x / 25.0)
+tile_y = floor(y / 25.0)
+tile_id = (level_id, tile_x, tile_y)
 ```
 
-Generate 25 m tiles, viewpoint-bearing map keyframes/local submaps, map poses, and `keyframe -> pose -> tile/submap` associations. Reserve versioned manifest fields and output directories for the Scan Context descriptors and search data added in Task 10. Write into a temporary sibling directory and atomically rename only after all current artifacts and `manifest.yaml` are mutually consistent. Preserve all source data.
+2. Require a stable `level_id`, or deterministic z-band metadata when a semantic floor ID is unavailable. Never merge two similar floors only because their XY indices match.
+3. Store manifest version, map ID, generation, frames, tile size, levels/z ranges, tile bounding boxes, point counts, voxel size, checksums, keyframe index reference, and creation/config hashes.
+4. Reject incompatible schema, wrong frame, duplicate tile IDs, overlapping level bands beyond policy, checksum mismatch, or missing required files before localization starts.
 
-Also support `--input map.pcd` as a legacy compatibility mode that produces tiles only. Mark `automatic_global_relocalization: false` in its manifest unless suitable keyframes/poses are supplied; document that it supports manual rough-pose initialization but cannot promise arbitrary-pose recovery.
+**Focused tests:** positive/negative boundaries; exact 25 m edge; two levels at the same XY; manifest round trip; corrupt checksum; unsupported version.
 
-**Step 4: Add documentation and verification command**
+**Acceptance:** A map larger than 100,000 m² can be indexed without loading point data, and same-XY multi-floor data remains isolated.
 
-Document directory layout, disk-space estimate, re-running behavior, legacy-map limitations, index versioning, and a `--verify-only` mode that checks tile, pose, and map-hash consistency. Task 10 extends verification to descriptors and the candidate index.
+**Commit:** `feat: define level-aware tiled map format`
 
-**Step 5: Verify**
-
-```bash
-colcon build --packages-select localizer --symlink-install
-colcon test --packages-select localizer --event-handlers console_direct+
-ros2 run localizer map_tile_builder --help
-```
-
-Expected: tests pass and CLI usage is printed.
-
-**Step 6: Commit**
-
-```bash
-git add localizer docs/map-tiling.md
-git commit -m "feat: build versioned tiled localization maps"
-```
-
-### Task 7: Build the Bounded Tiled-Map Cache (P1)
+### Task 6: Implement Streaming, Transactional Map Save and Offline Tile Build
 
 **Files:**
-- Create: `localizer/src/localizers/tiled_map_cache.h`
-- Create: `localizer/src/localizers/tiled_map_cache.cpp`
-- Create: `localizer/test/test_tiled_map_cache.cpp`
-- Modify: `localizer/config/localizer.yaml`
 
-**Step 1: Write failing cache tests**
+- Modify: `pgo/src/pgo_node.cpp`
+- Create: `map_tools/src/tile_builder_node.cpp`
+- Create: `map_tools/src/map_validator.cpp`
+- Create: `map_tools/test/test_transactional_save.cpp`
 
-Test 3×3 active-window selection, boundary prefetch, hysteresis, LRU order, byte/tile limits, pinned-tile protection, missing tiles, and cache reuse when the center tile is unchanged.
+**Implementation:**
 
-**Step 2: Verify failure**
+1. Stop constructing a second full merged point cloud in RAM during save. Stream admitted keyframe patches/poses to a temporary map directory.
+2. Build tiles offline or in a bounded worker by transforming one patch at a time, voxelizing per tile, flushing at a byte limit, and releasing source memory.
+3. Write checksums and manifest last, fsync where appropriate, validate the temporary generation, then atomically replace the generation pointer/directory.
+4. Preserve the last valid generation after disk-full, process interruption, malformed patch, or checksum failure.
+5. Keep a merged PCD export as an explicit offline compatibility command, not the normal online save path.
 
-```bash
-colcon test --packages-select localizer --ctest-args -R test_tiled_map_cache --output-on-failure
-```
+**Focused tests:** forced disk-full/write failure; interruption before manifest; corrupt patch; repeated generation; peak-memory test with synthetic large map.
 
-Expected: compile failure before the cache exists.
+**Acceptance:** Save peak RSS remains bounded by configured working sets rather than total map size; a failed save cannot destroy the previous map.
 
-**Step 3: Implement the cache with injected I/O**
+**Commit:** `feat: stream and atomically publish map generations`
 
-Inject a tile loader interface so unit tests do not touch PCD files. Return immutable shared tile handles containing fine/rough point sets and preprocessed registration structures. Do not hold the cache mutex during disk reads or preprocessing.
-
-**Step 4: Add initial configuration**
-
-```yaml
-map:
-  tile_size: 25.0
-  active_radius_tiles: 1
-  prefetch_margin: 5.0
-  hysteresis: 2.0
-  max_cached_tiles: 25
-  max_cache_bytes: 1073741824
-```
-
-**Step 5: Verify P1 checkpoint**
-
-```bash
-colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release
-colcon test --event-handlers console_direct+
-colcon test-result --verbose
-```
-
-Expected: zero failed tests and cache tests prove bounded tile count/bytes.
-
-**Step 6: Commit**
-
-```bash
-git add localizer
-git commit -m "feat: cache bounded local map tiles"
-```
-
-### Task 8: Introduce a Registration Adapter and small_gicp (P2)
+### Task 7: Add a Bounded Same-Level Tile Cache
 
 **Files:**
-- Create: `localizer/src/localizers/registration_types.h`
-- Create: `localizer/src/localizers/registration_backend.h`
-- Create: `localizer/src/localizers/pcl_icp_backend.h`
-- Create: `localizer/src/localizers/pcl_icp_backend.cpp`
-- Create: `localizer/src/localizers/small_gicp_backend.h`
-- Create: `localizer/src/localizers/small_gicp_backend.cpp`
-- Create: `localizer/test/test_registration_quality.cpp`
-- Create: `localizer/test/test_registration_backends.cpp`
+
+- Create: `localizer/include/localizer/tile_cache.h`
+- Create: `localizer/src/tile_cache.cpp`
+- Create: `localizer/test/test_tile_cache.cpp`
+- Modify: `localizer/config/*.yaml`
+
+**Implementation:**
+
+1. Load the current same-level 3 × 3 neighborhood by default; prefetch directionally only when motion and budget permit.
+2. Bound cache by both tile count and bytes. Use LRU eviction while pinning tiles referenced by an active registration snapshot.
+3. Deduplicate concurrent loads, reject checksum/level mismatch, and return explicit missing/corrupt status.
+4. Build reusable small_gicp target structures when a tile neighborhood generation changes, not per scan.
+
+**Focused tests:** LRU order; byte/count limits; pinning; concurrent duplicate request; level switch; missing/corrupt tile; 100,000 m² synthetic traversal.
+
+**Acceptance:** Cache size and peak RSS remain bounded; no registration combines incompatible levels.
+
+**Commit:** `feat: add bounded level-aware tile cache`
+
+### P1 Checkpoint
+
+Validate transactional save/recovery, multi-floor isolation, long synthetic traversal, cache bounds, and map-format rejection. Do not begin P2 until memory consumption is independent of total map size during online localization.
+
+---
+
+## P2 — Efficient Local Tracking and Trust Gate
+
+### Task 8: Add a Preprocessed small_gicp Registration Adapter
+
+**Files:**
+
+- Create: `localizer/include/localizer/registration_backend.h`
+- Create: `localizer/src/small_gicp_backend.cpp`
+- Create: `localizer/test/test_registration_backend.cpp`
 - Modify: `localizer/CMakeLists.txt`
 - Modify: `localizer/package.xml`
-- Modify: `localizer/config/localizer.yaml`
 
-**Step 1: Pin and build small_gicp in the ROS2 workspace**
+**Implementation:**
 
-Record the selected upstream release/commit in `docs/dependencies.md`. Use `find_package(small_gicp REQUIRED)`; do not fetch changing `master` during the build.
+1. Wrap registration behind a narrow backend interface returning transform, convergence, RMSE, inliers, overlap, Hessian/conditioning metric, and elapsed time.
+2. Preprocess and reuse the target neighborhood. Bound source points, maximum iterations, correspondence distance, threads, and deadline.
+3. Keep the existing PCL ICP path only as a temporary rollback backend through P2 acceptance. Do not maintain two production algorithms after small_gicp passes recorded-bag accuracy and latency gates.
+4. Reject non-finite transforms, deadline overruns, excessive correction jumps, and ill-conditioned results.
 
-**Step 2: Write backend contract tests**
+**Focused tests:** known transform; low overlap; planar degeneracy; empty input; deadline; target preprocessing reuse; parity benchmark against the temporary backend.
 
-The shared result must contain:
+**Acceptance:** small_gicp meets accuracy gates while lowering or matching p95 latency; backend cannot allocate/work without configured bounds.
 
-```cpp
-struct RegistrationResult {
-  bool converged;
-  Eigen::Isometry3d transform;
-  double rmse;
-  std::size_t inliers;
-  double inlier_ratio;
-  double overlap;
-  Eigen::Matrix<double, 6, 6> hessian;
-  std::size_t iterations;
-  double elapsed_ms;
-};
-```
+**Commit:** `feat: add bounded preprocessed small-gicp backend`
 
-Test identity alignment, known transform, insufficient points, no overlap, and reuse of a preprocessed target.
-
-**Step 3: Verify failure**
-
-```bash
-colcon test --packages-select localizer --ctest-args -R test_registration --output-on-failure
-```
-
-Expected: compile failure before the adapters exist.
-
-**Step 4: Implement compatibility and small_gicp backends**
-
-- preserve PCL ICP behind the interface for rollback;
-- preprocess each immutable target tile/window once;
-- use small_gicp GICP or VGICP with two threads by default;
-- cap source and target point counts;
-- expose complete quality data;
-- avoid rebuilding unchanged target search structures.
-
-**Step 5: Add configuration**
-
-```yaml
-registration:
-  backend: small_gicp
-  type: VGICP
-  threads: 2
-  update_hz: 1.0
-  rough_resolution: 0.5
-  fine_resolution: 0.2
-  rough_max_correspondence: 1.5
-  fine_max_correspondence: 0.5
-  max_source_points: 15000
-  max_target_points: 80000
-```
-
-**Step 6: Verify**
-
-```bash
-colcon build --packages-select localizer --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release
-colcon test --packages-select localizer --event-handlers console_direct+
-```
-
-Expected: both backends pass common correctness tests.
-
-**Step 7: Commit**
-
-```bash
-git add localizer docs/dependencies.md
-git commit -m "feat: add reusable small_gicp registration backend"
-```
-
-### Task 9: Implement Quality Gates and Asynchronous Local Tracking (P2)
+### Task 9: Add the Quality Gate and Asynchronous Local Tracking
 
 **Files:**
-- Create: `localizer/src/localizers/registration_quality_gate.h`
-- Create: `localizer/src/localizers/registration_quality_gate.cpp`
-- Create: `localizer/src/localizers/localization_worker.h`
-- Create: `localizer/src/localizers/localization_worker.cpp`
-- Create: `localizer/test/test_registration_quality_gate.cpp`
-- Create: `localizer/test/test_localization_worker.cpp`
+
+- Create: `localizer/include/localizer/registration_quality_gate.h`
+- Create: `localizer/src/registration_quality_gate.cpp`
 - Modify: `localizer/src/localizer_node.cpp`
-- Modify: `localizer/config/localizer.yaml`
+- Create: `localizer/test/test_registration_quality_gate.cpp`
+- Create: `localizer/test/test_latest_registration.cpp`
 
-**Step 1: Write table-driven quality tests**
+**Implementation:**
 
-Cover every rejection reason independently: no convergence, too few inliers, low inlier ratio, low overlap, high RMSE, excessive correction, non-finite Hessian, poor condition, and motion inconsistency. Test that all checks must pass.
+1. Evaluate RMSE, inlier count/ratio, overlap, conditioning, correction jump, deadline, tile completeness, and predicted motion. No single scalar is sufficient.
+2. Use state-dependent thresholds: tracking may use a tight predicted-pose search; recovery requires stronger evidence and an ambiguity margin.
+3. Run local registration asynchronously with one in-flight job and one latest pending request. Tag inputs/results with generation IDs and discard obsolete results.
+4. Apply accepted corrections through a bounded `map -> odom` update policy. Large but valid recovery corrections require the recovery confirmation path instead of entering tracking directly.
+5. Publish reason codes for every rejection and all metrics needed to reproduce the decision.
 
-**Step 2: Write worker scheduling tests**
+**Focused tests:** each rejection reason; threshold hysteresis; outdated result; worker overrun; abrupt false match; DEGRADED/LOST transition; recovery jump routing.
 
-Inject fake registration and tile-cache implementations. Prove that callbacks are non-blocking, newest input replaces old input, map reload cancels/invalidates old work, and state transitions follow Task 3.
+**Acceptance:** Front-end callbacks never wait for registration; stale/ambiguous results cannot update global TF; CPU use stays bounded during overload.
 
-**Step 3: Verify failure**
+**Commit:** `feat: gate and schedule local registration safely`
 
-```bash
-colcon test --packages-select localizer --ctest-args -R "test_(registration_quality_gate|localization_worker)" --output-on-failure
-```
+### P2 Checkpoint
 
-Expected: compile failure before the gate and worker exist.
+Run representative straight, turning, stop/start, sparse geometry, repetitive corridor, and temporary occlusion bags. Compare baseline and optimized accuracy, p50/p95/p99 latency, CPU, RSS, and state transitions. Remove the PCL rollback backend after the agreed parity window; document any temporary retention with an expiry condition.
 
-**Step 4: Implement the gate and worker**
+---
 
-The worker owns the registration backend and map snapshot. It posts results to the node through a result slot; the node applies a correction only if the result references the current map generation and passes the gate.
-
-**Step 5: Add configurable initial thresholds**
-
-```yaml
-quality:
-  min_inliers: 800
-  min_inlier_ratio: 0.25
-  min_overlap: 0.20
-  max_rmse: 0.35
-  max_tracking_translation: 1.5
-  max_tracking_rotation_deg: 10.0
-  max_hessian_condition: 1000000.0
-```
-
-These are starting values and must be tuned from bag data.
-
-**Step 6: Verify P2 checkpoint**
-
-```bash
-colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release
-colcon test --event-handlers console_direct+
-colcon test-result --verbose
-```
-
-Expected: zero failed tests; fake slow registration does not delay subscription callback tests.
-
-**Step 7: Commit**
-
-```bash
-git add localizer
-git commit -m "feat: gate and schedule local registration safely"
-```
+## P3 — Shared Place Recognition, Relocalization, and Loop Verification
 
 ### Task 10: Add Shared Online and Prebuilt-Map Place Recognition (P3)
 
 **Files:**
+
 - Create: `place_recognition/CMakeLists.txt`
 - Create: `place_recognition/package.xml`
-- Create: `place_recognition/include/place_recognition/scan_context_adapter.h`
-- Create: `place_recognition/include/place_recognition/map_place_index.h`
-- Create: `place_recognition/src/scan_context_adapter.cpp`
-- Create: `place_recognition/src/map_place_index.cpp`
-- Create: `place_recognition/test/test_scan_context_adapter.cpp`
-- Create: `place_recognition/test/test_map_place_index.cpp`
-- Create: `localizer/test/test_map_place_index_builder.cpp`
-- Create: `pgo/src/pgos/loop_candidate.h`
-- Create: `pgo/test/test_loop_candidate_filter.cpp`
-- Modify: `pgo/src/pgos/simple_pgo.h`
-- Modify: `pgo/src/pgos/simple_pgo.cpp`
-- Modify: `pgo/config/pgo.yaml`
-- Modify: `pgo/CMakeLists.txt`
-- Modify: `pgo/package.xml`
-- Modify: `localizer/CMakeLists.txt`
-- Modify: `localizer/package.xml`
-- Modify: `localizer/src/map_tile_builder.cpp`
-- Create: `docs/dependencies-scan-context.md`
+- Create: `place_recognition/include/place_recognition/place_index.h`
+- Create: `place_recognition/src/place_index.cpp`
+- Create: `place_recognition/test/test_place_index.cpp`
+- Modify: `map_tools/src/tile_builder_node.cpp`
+- Modify: `localizer/src/localizer_node.cpp`
+- Modify: `pgo/src/pgo_node.cpp`
 
-**Step 1: Pin Scan Context and preserve its license**
+**Implementation:**
 
-Vendor or reference a fixed upstream commit, record its URL/commit/license, and wrap it in a ROS-independent package so upstream types do not leak into either PGO or localizer APIs. Do not copy code from `FAST_LIO_LOCALIZATION`; it uses a different license and does not provide place recognition.
+1. Build one shared library for descriptor generation, index serialization, candidate filtering, and scoring. The localizer and PGO must not drift into separate Scan Context implementations.
+2. Store descriptor version/config hash, keyframe pose, yaw hint, `level_id`, associated tiles, session ID, timestamp, and checksum.
+3. For prebuilt maps, generate the index offline. For online mapping, add only admitted keyframes and bound retained raw clouds.
+4. Filter candidates by descriptor score, temporal/session rules, level compatibility, and optional rough-pose radius. Return top-K with scores; do not claim a pose from descriptor similarity alone.
+5. Set default `K=3`, configurable and benchmarked. Cache/load the compact index independently from tile point data.
 
-**Step 2: Write candidate tests**
+**Focused tests:** serialization compatibility; descriptor/config mismatch; same-place retrieval; repeated structure ambiguity; same-XY different-level rejection; online/offline descriptor parity.
 
-Test descriptor insertion, top-three ordering, temporal exclusion, empty database, reverse-yaw candidate handling, serialization round trip, map/index hash mismatch, descriptor-to-pose/tile lookup, and that a descriptor match alone cannot create a loop factor.
+**Acceptance:** Candidate lookup latency and memory are bounded for the acceptance map; both loop closure and relocalization consume the same tested implementation.
 
-**Step 3: Verify failure**
-
-```bash
-colcon test --packages-select place_recognition pgo --ctest-args -R "test_(scan_context|map_place_index|loop_candidate)" --output-on-failure
-```
-
-Expected: compile failure before the adapter exists.
-
-**Step 4: Build and load the prebuilt-map place index**
-
-- compute descriptors from saved map keyframes/local submaps with known map poses;
-- persist descriptors, search data, pose, submap ID, and covering tile IDs;
-- bind the index to the exact map manifest by schema version and content hash;
-- expose top-k query results as immutable candidate records;
-- refuse automatic recovery when the index is absent, corrupt, or belongs to another map;
-- let a legacy monolithic PCD report rough-pose-only capability instead of synthesizing unreliable viewpoint descriptors.
-
-**Step 5: Integrate online loop candidate generation**
-
-- compute descriptors only for admitted keyframes;
-- query at a configurable maximum rate;
-- retrieve top three candidates;
-- exclude recent frames by both elapsed time and keyframe distance;
-- enqueue candidates for geometry verification;
-- retain position-radius search as an optional secondary candidate source, not the sole detector.
-
-Both PGO and localizer must use the same library and descriptor parameter set. PGO owns only its online history; localizer loads the versioned prebuilt-map index.
-
-**Step 6: Add configuration**
-
-```yaml
-scan_context:
-  enabled: true
-  top_k: 3
-  exclude_recent_seconds: 60.0
-  exclude_recent_keyframes: 30
-  query_hz: 1.0
-```
-
-**Step 7: Verify and commit**
-
-```bash
-colcon build --packages-select place_recognition localizer pgo --symlink-install
-colcon test --packages-select place_recognition localizer pgo --event-handlers console_direct+
-git add place_recognition localizer pgo docs/dependencies-scan-context.md
-git commit -m "feat: share versioned place recognition for loops and recovery"
-```
+**Commit:** `feat: share bounded place recognition index`
 
 ### Task 11: Add On-Demand Global Recovery and Robust Loop Verification (P3)
 
 **Files:**
-- Create: `localizer/src/localizers/global_registration_backend.h`
-- Create: `localizer/src/localizers/global_recovery_worker.h`
-- Create: `localizer/src/localizers/global_recovery_worker.cpp`
-- Create: `localizer/test/test_global_recovery_worker.cpp`
-- Create: `localizer/test/test_relocalization_modes.cpp`
-- Create: `pgo/src/pgos/loop_verifier.h`
-- Create: `pgo/src/pgos/loop_verifier.cpp`
+
+- Create: `localizer/include/localizer/global_recovery.h`
+- Create: `localizer/src/global_recovery.cpp`
+- Create: `localizer/test/test_global_recovery.cpp`
+- Create: `pgo/include/pgo/loop_verifier.h`
+- Create: `pgo/src/loop_verifier.cpp`
 - Create: `pgo/test/test_loop_verifier.cpp`
 - Modify: `localizer/src/localizer_node.cpp`
-- Modify: `pgo/src/pgo_node.cpp`
-- Modify: `pgo/src/pgos/simple_pgo.cpp`
-- Modify: `pgo/config/pgo.yaml`
+- Modify: `pgo/src/simple_pgo.cpp`
 
-**Step 1: Write fake-backend recovery tests**
-
-Prove both recovery modes:
-
-- `ROUGH_POSE` selects the 25 m neighborhood around the supplied pose, runs coarse-to-fine local GICP, and never invokes full-map candidate search;
-- `AUTO` starts only in `UNINITIALIZED`, `RELOCALIZING`, or `LOST`, queries the prebuilt map place index, and reports a capability error when that index is unavailable.
-
-For both modes, prove cancellation on map generation change, transition to `RECOVERING` only after the quality gate, and three consistent local matches before `TRACKING`. Test action feedback, cancellation, timeout, and that the compatibility service reports request acceptance rather than solved pose.
-
-**Step 2: Write loop-verifier tests**
-
-Test top-k candidates where the best descriptor is geometrically wrong, a later candidate is valid, all candidates fail, transforms violate motion bounds, Hessians are degenerate, and temporal consistency rejects a one-frame false positive.
-
-**Step 3: Verify failure**
-
-```bash
-colcon test --packages-select localizer pgo --ctest-args -R "test_(global_recovery|loop_verifier)" --output-on-failure
-```
-
-Expected: compile failure before workers/verifier exist.
-
-**Step 4: Implement the on-demand path**
-
-- define a global-registration interface so KISS-Matcher/Quatro/TEASER++ can be selected without changing node logic;
-- implement the first selected backend as a pinned optional dependency;
-- in automatic mode, query the map place index for top-three candidates and load only each candidate's associated tiles/submap;
-- in rough-pose mode, bypass Scan Context and load the predicted 3×3 tile window directly;
-- refine every accepted global result with the Task 8 GICP backend;
-- apply the Task 9 quality gate;
-- require three temporally consistent keyframes before marking the global pose trusted;
-- enforce a shared concurrency limit so global and local registration cannot both saturate the target platform;
-- continue publishing local odometry while global pose validity is false.
-
-**Step 5: Integrate robust loop factors**
-
-Pass the verified transform and regularized quality information to `NoiseModelFactory`. Add the factor only after all checks pass. Record accepted and rejected candidate metrics and rejection reasons.
-
-**Step 6: Optimize ordinary iSAM2 updates**
-
-On a non-loop keyframe, calculate only the latest pose estimate. Refresh all stored global poses only after an accepted loop, explicit save, or requested visualization snapshot.
-
-**Step 7: Verify P3 checkpoint and commit**
-
-```bash
-colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release
-colcon test --event-handlers console_direct+
-colcon test-result --verbose
-git add localizer pgo
-git commit -m "feat: recover globally and verify loops robustly"
-```
-
-### Task 12: Bound ROS2 Transport, Visualization, and Stored History
-
-**Files:**
-- Modify: `fastlio2/src/lio_node.cpp`
-- Modify: `pgo/src/pgo_node.cpp`
-- Modify: `pgo/src/pgos/simple_pgo.h`
-- Modify: `localizer/src/localizer_node.cpp`
-- Modify: `fastlio2/config/lio.yaml`
-- Modify: `pgo/config/pgo.yaml`
-- Create: `pgo/test/test_keyframe_retention.cpp`
-
-**Step 1: Write retention tests**
-
-Test bounded in-memory registration clouds, descriptor/pose retention, disk-backed or evicted clouds, and that saving a map reports missing data instead of dereferencing an evicted cloud.
-
-**Step 2: Implement bounded transport and visualization**
-
-- use sensor-data QoS with depth 1–5 for clouds;
-- avoid queue depth 10,000;
-- limit or disable full-path publication in production;
-- publish static/full maps once with transient-local QoS rather than serializing them every registration cycle;
-- disable unused world-cloud/path visualization by configuration;
-- publish downsampled keyframe clouds to the backend;
-- retain full clouds only according to a configured memory/disk policy.
-
-**Step 3: Verify**
-
-```bash
-colcon build --packages-select fastlio2 pgo localizer --symlink-install
-colcon test --packages-select pgo localizer --event-handlers console_direct+
-```
-
-Expected: tests pass and queue/history limits are visible in diagnostics.
-
-**Step 4: Commit**
-
-```bash
-git add fastlio2 pgo localizer
-git commit -m "perf: bound cloud transport and keyframe history"
-```
-
-### Task 13: Add Platform-Neutral Benchmark and Bag-Regression Tooling
-
-**Files:**
-- Create: `tools/benchmark/run_bag_benchmark.py`
-- Create: `tools/benchmark/collect_metrics.py`
-- Create: `tools/benchmark/compare_results.py`
-- Create: `tools/benchmark/scenarios.yaml`
-- Create: `tools/benchmark/README.md`
-- Create: `test/system/README.md`
-- Create: `docs/performance-acceptance.md`
-
-**Step 1: Write failing parser/comparison tests**
-
-Create synthetic metrics JSON for baseline and candidate runs. Test P50/P95/P99 computation, RSS growth detection, loop precision/recall, recovery-time calculation, threshold failure, and missing-metric handling.
-
-**Step 2: Implement deterministic benchmark output**
-
-Each run writes:
+**Core recovery pipeline:**
 
 ```text
-results/<scenario>/<git-sha>/
-  metadata.json
-  latency.json
-  resource.json
-  localization.json
-  loops.json
-  summary.md
+Scan Context top-3
+  -> candidate keyframe pose and yaw
+  -> candidate-associated same-level tiles
+  -> coarse bounded GICP
+  -> fine bounded GICP
+  -> multi-metric quality gate
+  -> best-versus-second ambiguity margin
+  -> three motion-consistent frames
+  -> RECOVERING then TRACKING
 ```
 
-Record git SHA, YAML hashes, bag hash, target identifier, CPU architecture and core count, kernel, ROS middleware, thread count, temperature when available, and throttling state.
+**Implementation:**
 
-**Step 3: Define acceptance scenarios**
+1. Trigger automatic search when a ready map has no trusted initial pose and after confirmed `LOST`; also accept manual requests through `Relocalize.action`. Keep local odometry running while global validity is false.
+2. In `ROUGH_POSE` mode, bypass descriptor search and begin bounded registration from the supplied 6DoF pose. Both modes use the same tile loader, quality gate, and temporal confirmation.
+3. Process candidates sequentially under total time, memory, point, and iteration budgets. Support cancellation between stages.
+4. Never concatenate the entire map. Load only candidate-associated same-level tiles and release them after scoring.
+5. Require absolute quality thresholds and a configurable best/second score margin. If candidates remain ambiguous, stay LOST and report the ambiguity.
+6. After a winning candidate, require three consecutive scans whose accepted poses agree with local odometry motion before restoring global validity/TF.
+7. Reuse the same candidate and geometric verification pipeline for PGO loop proposals. Add a robust graph factor only after verification; blacklist repeatedly rejected pairs for a bounded interval.
+8. Re-optimize/publish only when a verified factor changes the graph; guard large corrections with diagnostics and configured limits.
 
-Include warehouse, corridor/tunnel, parking, outdoor, false-loop, kidnapped recovery, dynamic occlusion, 30-minute soak, and 100,000 m² map scenarios. A scenario may be marked pending only with an owner and missing dataset description.
+**Conditional P3b, not part of the default core:** Evaluate a heavy correspondence/global-registration backend only if versioned acceptance bags demonstrate that the candidate-pose coarse/fine GICP pipeline misses required recoveries. Admission requires a measured recall improvement large enough to justify its p95 latency, peak RSS, dependency, and maintenance cost. It remains on-demand and budgeted, never per-frame.
 
-**Step 4: Add acceptance gates**
+**Focused tests:** known kidnapping; false top-1/valid top-2; best/second ambiguity; wrong level; repetitive scene; cancellation; total deadline; three-frame consistency; false loop rejection; robust-factor outlier; bounded blacklist.
 
-- FASTLIO2 P99 below one sensor period;
-- local GICP P95 at or below 250 ms;
-- online RSS below 2 GB;
-- no monotonic RSS growth in the soak test;
-- pending queues never exceed one;
-- no accepted false loop in the adversarial set;
-- global recovery target at or below three seconds on representative revisits;
-- accuracy does not regress beyond the configured baseline tolerance.
+**Acceptance:** Recovery cannot create a trusted pose from descriptor score alone; false positive rate meets the acceptance gate; failed recovery does not block front-end odometry or grow memory.
 
-**Step 5: Run on the development machine, then every supported deployment target**
+**Commit:** `feat: add bounded relocalization and verified loops`
 
-```bash
-python3 tools/benchmark/run_bag_benchmark.py --scenario warehouse --output results
-python3 tools/benchmark/compare_results.py --baseline results/baseline --candidate results/candidate
-```
-
-Expected: the comparison exits non-zero for any failed acceptance gate and writes `summary.md`.
-
-**Step 6: Commit**
-
-```bash
-git add tools test/system docs/performance-acceptance.md
-git commit -m "test: add bounded-resource localization performance gates"
-```
-
-### Task 14: Complete Documentation, Migration, and Final Verification
+### Task 12: Bound ROS Transport, Histories, and Published Products
 
 **Files:**
+
+- Modify: `fastlio2/src/lio_node.cpp`
+- Modify: `localizer/src/localizer_node.cpp`
+- Modify: `pgo/src/pgo_node.cpp`
+- Modify: `fastlio2/config/*.yaml`
+- Modify: `localizer/config/*.yaml`
+- Modify: `pgo/config/*.yaml`
+- Create: `test/system/test_transport_bounds.py`
+
+**Implementation:**
+
+1. Use sensor-data QoS or small best-effort depths for high-rate clouds/IMU; use reliable depth 1–5 for control/status as appropriate. Remove oversized publisher histories.
+2. Bound path length, debug clouds, keyframe clouds, diagnostic history, and visualization rate. Disable world/full-map cloud publication by default.
+3. Publish static/prebuilt metadata once with appropriate durability; do not retransmit large map products per frame.
+4. Expose current internal queue/buffer sizes and drop/overwrite counts so transport and process backpressure are distinguishable.
+
+**Focused tests:** slow subscriber; disconnected subscriber; visualization enabled/disabled; history upper bounds; sustained sensor rate; no increase in RSS after warm-up beyond tolerance.
+
+**Acceptance:** Slow or absent subscribers cannot cause unbounded process memory or stall the estimator.
+
+**Commit:** `perf: bound transport and visualization histories`
+
+### Task 13: Add Versioned Bag Benchmarks and Fault Injection
+
+**Files:**
+
+- Create: `test/benchmark/README.md`
+- Create: `test/benchmark/manifest.yaml`
+- Create: `test/benchmark/run_benchmark.py`
+- Create: `test/fault_injection/*.py`
+- Create: `docs/acceptance-criteria.md`
+
+**Required scenarios:**
+
+- At least one map covering 100,000 m² or more, with a 30-minute continuous run.
+- Open area, repetitive corridor, turns, stops, dynamic occlusion, sparse geometry, and revisit loops.
+- Kidnapping/restart from multiple map regions, including near tile and level boundaries.
+- Same-XY multi-floor scenes designed to tempt a false match.
+- IMU delay/drop/saturation, LiDAR gaps, timestamp reset/regression, and initialization while moving.
+- Corrupt/missing tile, wrong map/index pair, config-hash mismatch, disk full, and interrupted map save.
+
+**Metrics and gates:**
+
+- Accuracy: ATE/RPE or surveyed checkpoints, loop correction error, recovery position/yaw error.
+- Safety: false trusted recovery count, stale-TF count, multi-floor false matches, invalid-state TF publication.
+- Recovery: recall, success rate, time-to-recover, candidates tested, ambiguity rejection.
+- Performance: total/per-node CPU, peak and steady RSS, callback/registration p50/p95/p99, cache hit rate, drops/overwrites.
+- Stability: crashes, deadlocks, state flapping, queue growth, and 30-minute memory slope.
+
+Every result must name the bag/map/config/software hashes. Establish numerical gates from the current working baseline and application requirements before declaring a phase complete; never replace safety gates with relative improvement alone.
+
+**Acceptance:** One command produces a machine-readable report and a non-zero exit code for gate failure.
+
+**Commit:** `test: add localization performance and fault gates`
+
+### Task 14: Complete Configuration, Migration, and Final Verification
+
+**Files:**
+
 - Modify: `README.md`
-- Create: `docs/localization-status.md`
-- Create: `docs/p0-p3-migration.md`
-- Create: `docs/deployment.md`
-- Create: `docs/loop-and-relocalization-tuning.md`
-- Modify: `localizer/launch/localizer_launch.py`
-- Modify: `pgo/launch/pgo_launch.py`
-- Modify: `hba/launch/hba_launch.py`
+- Modify: package launch/config files
+- Create: `docs/operational-profiles.md`
+- Create: `docs/relocalization.md`
+- Create: `docs/performance-tuning.md`
+- Modify: `.github/workflows/ros2-jazzy.yml`
 
-**Step 1: Document operational truth**
+**Implementation:**
 
-Clearly distinguish:
+1. Ship conservative defaults for mapping/localization/maintenance and validate mutually inconsistent parameters at startup.
+2. Document map building/validation, map ID and generation handling, initial pose, action feedback/cancellation, LOST behavior, TF ownership, and rollback.
+3. Document performance tuning in priority order: point budget/voxel size, local registration rate, tile cache, thread count, candidate count, then recovery deadline. Preserve safety thresholds unless benchmark evidence supports a change.
+4. Remove obsolete launch options, duplicate production registration code, stale documentation, and hidden hardware-specific assumptions.
+5. Run full unit/system tests, all acceptance bags, fault injection, clean-install launch, and map migration/rollback.
 
-- smooth but locally drifting `odom`;
-- globally corrected `map`;
-- valid and invalid global localization states;
-- online PGO/localizer versus offline HBA;
-- monolithic-map compatibility versus tiled production maps.
+**Acceptance:** A new operator can select a profile and map without source edits; unsupported combinations fail clearly; CI and representative target results pass.
 
-**Step 2: Document migration**
+**Commit:** `docs: finalize bounded localization operations`
 
-Provide exact Jazzy commands to build Livox integration, tile an existing map, build/verify the prebuilt-map place index, launch with PCL compatibility, launch with small_gicp, choose automatic or rough-pose relocalization, inspect action/status results, and roll back each phase by YAML. Explicitly document the automatic-recovery limitation of legacy PCD-only maps.
+### P3 Checkpoint
 
-**Step 3: Verify launch and configuration parsing**
+P3 passes only when automatic/manual relocalization, verified loops, long-run resource bounds, fault injection, and public operational documentation all satisfy the recorded gates.
 
-```bash
-colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release
-source install/setup.bash
-ros2 launch fastlio2 lio_launch.py --show-args
-ros2 launch localizer localizer_launch.py --show-args
-ros2 launch pgo pgo_launch.py --show-args
-```
+---
 
-Expected: every launch file resolves without missing parameters or packages.
+## Separate Offline Optimization Track
 
-**Step 4: Run full verification**
+HBA and other batch refinements remain offline maintenance tools. Their numerical hardening, checkpoint/restart support, and large-map optimization are useful but must not block P0–P3 online safety. They do not publish live global TF and are benchmarked against map-quality improvement and offline resource/time budgets.
 
-```bash
-colcon test --event-handlers console_direct+
-colcon test-result --verbose
-git diff --check origin/main...HEAD
-git status --short --branch
-```
+---
 
-Expected: zero failed tests, no whitespace errors, and only intended changes are present.
+## Final Definition of Done
 
-**Step 5: Run the target-platform acceptance matrix**
-
-Execute every available scenario in `tools/benchmark/scenarios.yaml`. Do not mark P0–P3 complete if a required scenario lacks results; document missing datasets as blocked acceptance work.
-
-**Step 6: Commit**
-
-```bash
-git add README.md docs localizer/launch pgo/launch hba/launch
-git commit -m "docs: complete bounded-resource P0-P3 deployment guide"
-```
-
-## Final Delivery Criteria
-
-P0–P3 is complete only when:
-
-- a clean Ubuntu 24.04/ROS 2 Jazzy workspace builds without undeclared transitive dependencies;
-- all unit and integration tests pass;
-- every required benchmark gate passes on the supported deployment targets;
-- the 100,000 m² tiled map runs with bounded memory;
-- false-loop adversarial tests produce zero accepted false loops;
-- localization state accurately reports degradation and loss;
-- rough-pose and automatic recovery tests demonstrate `LOST -> RECOVERING -> TRACKING` without blocking FASTLIO2;
-- automatic startup and kidnapped recovery use a version-matched prebuilt map place index and reject mismatched or missing indexes safely;
-- online launch excludes HBA;
-- rollback switches and migration steps are documented and tested.
+- Exactly one node owns global TF in each online profile.
+- LiDAR/IMU units, time behavior, initialization, extrinsics, gaps, and buffers are explicit and observable.
+- LOST never appears as a fresh valid global pose; recovery requires geometric evidence, ambiguity rejection, and temporal consistency.
+- Online memory and work queues are bounded independently of total map size.
+- Map save is streaming and transactional; the previous valid generation survives failure.
+- 25 m XY tiles are isolated by level/z metadata and validated before use.
+- small_gicp reuses preprocessed targets and meets recorded latency/accuracy gates; duplicate fallback code is retired.
+- Loop closure and relocalization share place recognition and geometric verification.
+- Heavy global registration is introduced only after measured evidence, and only on demand.
+- Versioned bags, maps, configs, CI, and fault tests make every stability/performance claim reproducible.
