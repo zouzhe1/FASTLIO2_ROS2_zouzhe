@@ -1,13 +1,29 @@
-# FASTLIO2 ROS2
-## 主要工作
+# FASTLIO2 ROS2 zouzhe版本
+
+## zouzhe新增优化功能（2026-08-26）
+1. 增强 LiDAR/IMU 输入检查，支持 IMU 单位配置、时间戳回退、数据间断、异常值检测、静止初始化判断和缓存上限。
+2. 增加 mapping、localization、maintenance 三种运行模式和定位状态机，统一 `map -> odom` 发布权，定位失效时停止发布无效的全局 TF。
+3. 增加 25 m 分层瓦片地图，支持负坐标、多楼层隔离、地图版本、校验和、事务保存、离线分块和有界 LRU 缓存。
+4. 使用 small_gicp 实现有界异步局部配准，通过 RMSE、重叠率、内点率、退化程度、耗时和位姿跳变判断定位质量。
+5. 增加 AUTO 和 ROUGH_POSE 重定位，使用共享 Scan Context 候选检索、同层瓦片几何验证、歧义拒绝和连续多帧一致性确认。
+6. 优化回环检测和位姿图调度，增加关键帧预筛选、任务覆盖、旋转/平移独立噪声、鲁棒因子、回环复核和错误候选黑名单。
+7. 限制 QoS 深度、路径、点云、可视化历史和内部任务数量，降低大地图及长时间运行时的 CPU、内存和通信开销。
+8. 增加地图校验、故障注入、性能测试和 ROS 2 Jazzy 持续集成。
+
+相关文档：[运行模式](docs/operational-profiles.md) · [重定位](docs/relocalization.md) · [地图格式](docs/map-format.md) · [性能调优](docs/performance-tuning.md) · [验收条件](docs/acceptance-criteria.md)
+
+## 运行环境
+1. Ubuntu 24.04
+2. ROS2 Jazzy
+
+---
+# 下面是原说明信息
+## fork前主要工作
 1. 重构[FASTLIO2](https://github.com/hku-mars/FAST_LIO) 适配ROS2
 2. 添加回环节点，基于位置先验+ICP进行回环检测，基于GTSAM进行位姿图优化
 3. 添加重定位节点，基于由粗到细两阶段ICP进行重定位
 4. 增加一致性地图优化，基于[BLAM](https://github.com/hku-mars/BALM) (小场景地图) 和[HBA](https://github.com/hku-mars/HBA) (大场景地图)
 
-## 环境依赖
-1. Ubuntu 22.04
-2. ROS2 Humble
 
 ## 编译依赖
 ```text
@@ -34,8 +50,8 @@ sudo make install
 mkdir -r ws_livox/src
 git clone https://github.com/Livox-SDK/livox_ros_driver2.git ws_livox/src/livox_ros_driver2
 cd ws_livox/src/livox_ros_driver2
-source /opt/ros/humble/setup.sh
-./build.sh humble
+source /opt/ros/jazzy/setup.sh
+./build.sh jazzy
 ```
 
 ### 3.编译 Sophus
@@ -55,7 +71,6 @@ sudo make install
 ## 实例数据集
 ```text
 链接: https://pan.baidu.com/s/1rTTUlVwxi1ZNo7ZmcpEZ7A?pwd=t6yb 提取码: t6yb 
---来自百度网盘超级会员v7的分享
 ```
 
 ## 部分脚本

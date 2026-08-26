@@ -3,6 +3,17 @@ odom_topic: /fastlio2/lio_odom
 map_frame: map
 local_frame: lidar
 update_hz: 1.0
+degraded_after_failures: 2
+lost_after_failures: 5
+trusted_timeout_seconds: 5.0
+recovery_consistent_frames: 3
+publish_map_cloud: false
+
+tile_size_m: 25.0
+tile_neighborhood_radius: 1
+tile_cache_max_tiles: 12
+tile_cache_max_bytes: 268435456
+tile_prefetch_enabled: true
 
 rough_scan_resolution: 0.25
 rough_map_resolution: 0.25
@@ -13,3 +24,12 @@ refine_scan_resolution: 0.1
 refine_map_resolution: 0.1
 refine_max_iteration: 10
 refine_score_thresh: 0.1
+
+registration_backend: small_gicp
+registration_voxel_resolution: 0.20
+registration_max_source_points: 12000
+registration_max_target_points: 120000
+registration_max_iterations: 20
+registration_max_correspondence_distance: 1.0
+registration_threads: 2
+registration_deadline_ms: 80.0

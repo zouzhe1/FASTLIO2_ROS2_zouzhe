@@ -1,5 +1,15 @@
 #include "simple_pgo.h"
 
+#include <gtsam/linear/NoiseModel.h>
+
+namespace
+{
+gtsam::Vector6 toVector6(const std::array<double, 6> & values)
+{
+    return (gtsam::Vector6() << values[0], values[1], values[2], values[3], values[4], values[5]).finished();
+}
+}  // namespace
+
 SimplePGO::SimplePGO(const Config &config) : m_config(config)
 {
     gtsam::ISAM2Params isam2_params;
@@ -51,7 +61,8 @@ bool SimplePGO::addKeyPose(const CloudWithPose &cloud_with_pose)
         const KeyPoseWithCloud &last_item = m_key_poses.back();
         M3D r_between = last_item.r_local.transpose() * cloud_with_pose.pose.r;
         V3D t_between = last_item.r_local.transpose() * (cloud_with_pose.pose.t - last_item.t_local);
-        gtsam::noiseModel::Diagonal::shared_ptr noise = gtsam::noiseModel::Diagonal::Variances((gtsam::Vector(6) << 1e-6, 1e-6, 1e-6, 1e-4, 1e-4, 1e-6).finished());
+        gtsam::noiseModel::Diagonal::shared_ptr noise =
+            gtsam::noiseModel::Diagonal::Variances(toVector6(pgo::odometryVariances(m_config.factor_noise)));
         m_graph.add(gtsam::BetweenFactor<gtsam::Pose3>(idx - 1, idx, gtsam::Pose3(gtsam::Rot3(r_between), gtsam::Point3(t_between)), noise));
     }
     KeyPoseWithCloud item;
@@ -155,6 +166,13 @@ void SimplePGO::searchForLoopPairs()
         return;
 
     M4F loop_transform = m_icp.getFinalTransformation();
+    const Eigen::AngleAxisf loop_rotation(loop_transform.block<3, 3>(0, 0));
+    const pgo::LoopEvidence evidence{
+        cur_idx, static_cast<std::uint64_t>(loop_idx), 0.0, 1.0, true,
+        m_icp.getFitnessScore(), loop_transform.block<3, 1>(0, 3).norm(),
+        std::abs(loop_rotation.angle()) * 57.29577951308232};
+    if (!m_loop_verifier.verify(evidence, last_item.time).accepted)
+        return;
 
     LoopPair one_pair;
     one_pair.source_id = cur_idx;
@@ -176,10 +194,13 @@ void SimplePGO::smoothAndUpdate()
     {
         for (LoopPair &pair : m_cache_pairs)
         {
-            m_graph.add(gtsam::BetweenFactor<gtsam::Pose3>(pair.target_id, pair.source_id,
-                                                           gtsam::Pose3(gtsam::Rot3(pair.r_offset),
-                                                                        gtsam::Point3(pair.t_offset)),
-                                                           gtsam::noiseModel::Diagonal::Variances(gtsam::Vector6::Ones() * pair.score)));
+            const auto diagonal = gtsam::noiseModel::Diagonal::Variances(
+                toVector6(pgo::loopVariances(pair.score, m_config.factor_noise)));
+            const auto robust = gtsam::noiseModel::Robust::Create(
+                gtsam::noiseModel::mEstimator::Huber::Create(1.345), diagonal);
+            m_graph.add(gtsam::BetweenFactor<gtsam::Pose3>(
+                pair.target_id, pair.source_id,
+                gtsam::Pose3(gtsam::Rot3(pair.r_offset), gtsam::Point3(pair.t_offset)), robust));
         }
         std::vector<LoopPair>().swap(m_cache_pairs);
     }
@@ -198,7 +219,8 @@ void SimplePGO::smoothAndUpdate()
 
     // update key poses
     gtsam::Values estimate_values = m_isam2->calculateBestEstimate();
-    for (size_t i = 0; i < m_key_poses.size(); i++)
+    const size_t update_begin = has_loop ? 0 : m_key_poses.size() - 1;
+    for (size_t i = update_begin; i < m_key_poses.size(); i++)
     {
         gtsam::Pose3 pose = estimate_values.at<gtsam::Pose3>(i);
         m_key_poses[i].r_global = pose.rotation().matrix().cast<double>();

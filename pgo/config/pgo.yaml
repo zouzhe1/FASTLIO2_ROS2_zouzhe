@@ -2,6 +2,9 @@ cloud_topic: /fastlio2/body_cloud
 odom_topic: /fastlio2/lio_odom
 map_frame: map
 local_frame: lidar
+map_id: fastlio2-map
+level_id: L0
+max_visualized_loops: 500
 
 key_pose_delta_deg: 10
 key_pose_delta_trans: 0.5
@@ -11,3 +14,12 @@ loop_score_tresh: 0.15
 loop_submap_half_range: 5
 submap_resolution: 0.1
 min_loop_detect_duration: 5.0
+
+# GTSAM Pose3 ordering: rotation xyz (rad^2), then translation xyz (m^2).
+factor_noise:
+  odometry_rotation_variance: 1.0e-6
+  odometry_translation_variance: 1.0e-4
+  loop_rotation_scale: 0.1
+  loop_translation_scale: 1.0
+  loop_score_min: 1.0e-4
+  loop_score_max: 0.25

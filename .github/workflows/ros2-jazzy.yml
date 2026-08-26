@@ -1,0 +1,95 @@
+name: ROS 2 Jazzy
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  sensor-contract:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add ROS 2 repository
+        uses: ros-tooling/setup-ros@v0.7
+        with:
+          required-ros-distributions: jazzy
+
+      - name: Build sensor contract without vendor driver
+        shell: bash
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          colcon build \
+            --packages-select fastlio2 \
+            --cmake-args \
+              -DFASTLIO_BUILD_NODE=OFF \
+              -DBUILD_TESTING=ON \
+              -DCMAKE_BUILD_TYPE=Release
+
+      - name: Test sensor contract
+        shell: bash
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          source install/setup.bash
+          colcon test \
+            --packages-select fastlio2 \
+            --event-handlers console_direct+ \
+            --ctest-args -R test_sensor_contract
+          colcon test-result --verbose
+
+  core-build-and-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add ROS 2 repository
+        uses: ros-tooling/setup-ros@v0.7
+        with:
+          required-ros-distributions: jazzy
+
+      - name: Install core dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtsam-dev \
+            libpcl-dev \
+            libyaml-cpp-dev \
+            python3-colcon-common-extensions \
+            python3-pytest \
+            ros-jazzy-ament-cmake-gtest \
+            ros-jazzy-ament-cmake-pytest \
+            ros-jazzy-message-filters \
+            ros-jazzy-pcl-conversions \
+            ros-jazzy-rclcpp \
+            ros-jazzy-rclcpp-action \
+            ros-jazzy-small-gicp-vendor \
+            ros-jazzy-tf2-ros
+
+      - name: Build core packages
+        shell: bash
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          colcon build \
+            --packages-up-to place_recognition map_tools localizer pgo \
+            --cmake-args -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
+
+      - name: Test core packages
+        shell: bash
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          source install/setup.bash
+          colcon test \
+            --packages-select place_recognition map_tools localizer pgo \
+            --event-handlers console_direct+ \
+            --ctest-args -R 'test_smoke|test_localization_state_machine|test_tf_policy|test_tf_owner_launch|test_tile|test_map_manifest|test_transactional|test_registration|test_latest|test_place_index|test_global_recovery|test_loop_verifier'
+          colcon test-result --verbose
+
+      - name: Test transport and benchmark harness
+        shell: bash
+        run: |
+          python3 -m pytest -q \
+            test/system/test_transport_bounds.py \
+            test/benchmark/test_run_benchmark.py
+
+  # The FASTLIO2 front-end needs the vendor Livox driver/SDK. The deployment
+  # workspace job added in the final integration task builds that complete set.

@@ -10,8 +10,13 @@
 #include <pcl_conversions/pcl_conversions.h>
 #include <visualization_msgs/msg/marker_array.hpp>
 #include <visualization_msgs/msg/marker.hpp>
-#include <queue>
 #include <filesystem>
+#include <stdexcept>
+#include "pgo/latest_value_slot.h"
+#include "map_tools/transactional_generation.h"
+#include "map_tools/map_manifest.h"
+#include "map_tools/tile_id.h"
+#include "place_recognition/place_index.h"
 #include "pgos/commons.h"
 #include "pgos/simple_pgo.h"
 #include "interface/srv/save_maps.hpp"
@@ -27,13 +32,23 @@ struct NodeConfig
     std::string odom_topic = "/lio/odom";
     std::string map_frame = "map";
     std::string local_frame = "lidar";
+    std::string operational_profile = "mapping";
+    bool publish_global_tf = true;
+    std::string map_id = "fastlio2-map";
+    std::string level_id = "L0";
+    std::size_t max_visualized_loops = 500;
 };
 
 struct NodeState
 {
     std::mutex message_mutex;
-    std::queue<CloudWithPose> cloud_buffer;
-    double last_message_time;
+    double last_message_time = -1.0;
+};
+
+struct PendingMeasurement
+{
+    sensor_msgs::msg::PointCloud2::ConstSharedPtr cloud_msg;
+    PoseWithTime pose;
 };
 
 class PGONode : public rclcpp::Node
@@ -43,11 +58,16 @@ public:
     {
         RCLCPP_INFO(this->get_logger(), "PGO node started");
         loadParameters();
+        if (m_node_config.operational_profile != "mapping" ||
+            !m_node_config.publish_global_tf)
+            throw std::runtime_error(
+                "pgo_node requires operational_profile=mapping and publish_global_tf=true");
         m_pgo = std::make_shared<SimplePGO>(m_pgo_config);
-        rclcpp::QoS qos = rclcpp::QoS(10);
+        rclcpp::QoS qos = rclcpp::SensorDataQoS().keep_last(5);
         m_cloud_sub.subscribe(this, m_node_config.cloud_topic, qos.get_rmw_qos_profile());
         m_odom_sub.subscribe(this, m_node_config.odom_topic, qos.get_rmw_qos_profile());
-        m_loop_marker_pub = this->create_publisher<visualization_msgs::msg::MarkerArray>("/pgo/loop_markers", 10000);
+        m_loop_marker_pub = this->create_publisher<visualization_msgs::msg::MarkerArray>(
+            "/pgo/loop_markers", rclcpp::QoS(1).best_effort());
         m_tf_broadcaster = std::make_shared<tf2_ros::TransformBroadcaster>(*this);
         m_sync = std::make_shared<message_filters::Synchronizer<message_filters::sync_policies::ApproximateTime<sensor_msgs::msg::PointCloud2, nav_msgs::msg::Odometry>>>(message_filters::sync_policies::ApproximateTime<sensor_msgs::msg::PointCloud2, nav_msgs::msg::Odometry>(10), m_cloud_sub, m_odom_sub);
         m_sync->setAgePenalty(0.1);
@@ -59,6 +79,10 @@ public:
     void loadParameters()
     {
         this->declare_parameter("config_path", "");
+        this->declare_parameter("operational_profile", "mapping");
+        this->declare_parameter("publish_global_tf", true);
+        this->declare_parameter("map_id", "fastlio2-map");
+        this->declare_parameter("level_id", "L0");
         std::string config_path;
         this->get_parameter<std::string>("config_path", config_path);
         YAML::Node config = YAML::LoadFile(config_path);
@@ -72,6 +96,12 @@ public:
         m_node_config.odom_topic = config["odom_topic"].as<std::string>();
         m_node_config.map_frame = config["map_frame"].as<std::string>();
         m_node_config.local_frame = config["local_frame"].as<std::string>();
+        if (config["max_visualized_loops"])
+            m_node_config.max_visualized_loops = config["max_visualized_loops"].as<std::size_t>();
+        this->get_parameter("operational_profile", m_node_config.operational_profile);
+        this->get_parameter("publish_global_tf", m_node_config.publish_global_tf);
+        this->get_parameter("map_id", m_node_config.map_id);
+        this->get_parameter("level_id", m_node_config.level_id);
 
         m_pgo_config.key_pose_delta_deg = config["key_pose_delta_deg"].as<double>();
         m_pgo_config.key_pose_delta_trans = config["key_pose_delta_trans"].as<double>();
@@ -81,33 +111,44 @@ public:
         m_pgo_config.loop_submap_half_range = config["loop_submap_half_range"].as<int>();
         m_pgo_config.submap_resolution = config["submap_resolution"].as<double>();
         m_pgo_config.min_loop_detect_duration = config["min_loop_detect_duration"].as<double>();
+        const YAML::Node noise = config["factor_noise"];
+        if (noise)
+        {
+            m_pgo_config.factor_noise.odometry_rotation_variance = noise["odometry_rotation_variance"].as<double>();
+            m_pgo_config.factor_noise.odometry_translation_variance = noise["odometry_translation_variance"].as<double>();
+            m_pgo_config.factor_noise.loop_rotation_scale = noise["loop_rotation_scale"].as<double>();
+            m_pgo_config.factor_noise.loop_translation_scale = noise["loop_translation_scale"].as<double>();
+            m_pgo_config.factor_noise.loop_score_min = noise["loop_score_min"].as<double>();
+            m_pgo_config.factor_noise.loop_score_max = noise["loop_score_max"].as<double>();
+        }
     }
     void syncCB(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud_msg, const nav_msgs::msg::Odometry::ConstSharedPtr &odom_msg)
     {
 
         std::lock_guard<std::mutex>(m_state.message_mutex);
-        CloudWithPose cp;
-        cp.pose.setTime(cloud_msg->header.stamp.sec, cloud_msg->header.stamp.nanosec);
-        if (cp.pose.second < m_state.last_message_time)
+        PendingMeasurement pending;
+        pending.pose.setTime(cloud_msg->header.stamp.sec, cloud_msg->header.stamp.nanosec);
+        if (pending.pose.second < m_state.last_message_time)
         {
             RCLCPP_WARN(this->get_logger(), "Received out of order message");
             return;
         }
-        m_state.last_message_time = cp.pose.second;
+        m_state.last_message_time = pending.pose.second;
 
-        cp.pose.r = Eigen::Quaterniond(odom_msg->pose.pose.orientation.w,
+        pending.pose.r = Eigen::Quaterniond(odom_msg->pose.pose.orientation.w,
                                        odom_msg->pose.pose.orientation.x,
                                        odom_msg->pose.pose.orientation.y,
                                        odom_msg->pose.pose.orientation.z)
                         .toRotationMatrix();
-        cp.pose.t = V3D(odom_msg->pose.pose.position.x, odom_msg->pose.pose.position.y, odom_msg->pose.pose.position.z);
-        cp.cloud = CloudType::Ptr(new CloudType);
-        pcl::fromROSMsg(*cloud_msg, *cp.cloud);
-        m_state.cloud_buffer.push(cp);
+        pending.pose.t = V3D(odom_msg->pose.pose.position.x, odom_msg->pose.pose.position.y, odom_msg->pose.pose.position.z);
+        pending.cloud_msg = cloud_msg;
+        m_pending_measurement.push(std::move(pending));
     }
 
     void sendBroadCastTF(builtin_interfaces::msg::Time &time)
     {
+        if (!m_node_config.publish_global_tf)
+            return;
         geometry_msgs::msg::TransformStamped transformStamped;
         transformStamped.header.frame_id = m_node_config.map_frame;
         transformStamped.child_frame_id = m_node_config.local_frame;
@@ -164,7 +205,9 @@ public:
 
         std::vector<KeyPoseWithCloud> &poses = m_pgo->keyPoses();
         std::vector<std::pair<size_t, size_t>> &pairs = m_pgo->historyPairs();
-        for (size_t i = 0; i < pairs.size(); i++)
+        const size_t first_pair = pairs.size() > m_node_config.max_visualized_loops ?
+            pairs.size() - m_node_config.max_visualized_loops : 0;
+        for (size_t i = first_pair; i < pairs.size(); i++)
         {
             size_t i1 = pairs[i].first;
             size_t i2 = pairs[i].second;
@@ -190,20 +233,21 @@ public:
 
     void timerCB()
     {
-        if (m_state.cloud_buffer.size() == 0)
+        auto pending = m_pending_measurement.take();
+        if (!pending.has_value())
             return;
-        CloudWithPose cp = m_state.cloud_buffer.front();
-        // 清理队列
-        {
-            std::lock_guard<std::mutex>(m_state.message_mutex);
-            while (!m_state.cloud_buffer.empty())
-            {
-                m_state.cloud_buffer.pop();
-            }
-        }
+        CloudWithPose cp;
+        cp.pose = pending->pose;
         builtin_interfaces::msg::Time cur_time;
         cur_time.sec = cp.pose.sec;
         cur_time.nanosec = cp.pose.nsec;
+        if (!m_pgo->isKeyPose(cp.pose))
+        {
+            sendBroadCastTF(cur_time);
+            return;
+        }
+        cp.cloud = CloudType::Ptr(new CloudType);
+        pcl::fromROSMsg(*pending->cloud_msg, *cp.cloud);
         if (!m_pgo->addKeyPose(cp))
         {
 
@@ -214,6 +258,20 @@ public:
         m_pgo->searchForLoopPairs();
 
         m_pgo->smoothAndUpdate();
+
+        const auto & key_pose = m_pgo->keyPoses().back();
+        place_recognition::PlaceMetadata place;
+        place.id = m_pgo->keyPoses().size() - 1;
+        place.x = key_pose.t_global.x(); place.y = key_pose.t_global.y(); place.z = key_pose.t_global.z();
+        place.level_id = m_node_config.level_id;
+        place.tile_keys = {map_tools::tileForPoint(place.level_id, place.x, place.y).stableKey()};
+        place.session_id = "online";
+        place.timestamp = key_pose.time;
+        std::vector<place_recognition::Point3> descriptor_points;
+        descriptor_points.reserve(key_pose.body_cloud->size());
+        for (const auto & point : *key_pose.body_cloud)
+            descriptor_points.push_back({point.x, point.y, point.z});
+        m_place_index.add(place, descriptor_points);
 
         sendBroadCastTF(cur_time);
 
@@ -236,58 +294,73 @@ public:
             return;
         }
 
-        std::filesystem::path p_dir(request->file_path);
-        std::filesystem::path patches_dir = p_dir / "patches";
-        std::filesystem::path poses_txt_path = p_dir / "poses.txt";
-        std::filesystem::path map_path = p_dir / "map.pcd";
-
-        if (request->save_patches)
+        try
         {
-            if (std::filesystem::exists(patches_dir))
+            const std::filesystem::path root(request->file_path);
+            std::uint64_t generation = 1;
+            try { generation = map_tools::readCurrentGeneration(root) + 1; } catch (...) {}
+            while (std::filesystem::exists(root / ("generation-" + std::to_string(generation)))) ++generation;
+            map_tools::TransactionalGeneration save(root, generation);
+            std::ofstream poses(save.stagingPath() / "poses.txt");
+            std::vector<std::pair<std::string, std::string>> patch_checksums;
+            if (!poses) throw std::runtime_error("cannot create poses.txt");
+            for (size_t i = 0; i < m_pgo->keyPoses().size(); ++i)
             {
-                std::filesystem::remove_all(patches_dir);
+                const std::string patch_name = std::to_string(i) + ".pcd";
+                const std::filesystem::path relative = std::filesystem::path("patches") / patch_name;
+                std::filesystem::create_directories((save.stagingPath() / relative).parent_path());
+                if (pcl::io::savePCDFileBinary(
+                    (save.stagingPath() / relative).string(), *m_pgo->keyPoses()[i].body_cloud) != 0)
+                    throw std::runtime_error("failed to save patch " + patch_name);
+                save.sealExistingFile(relative);
+                patch_checksums.emplace_back(
+                    relative.generic_string(), map_tools::fileChecksum(save.stagingPath() / relative));
+                const Eigen::Quaterniond q(m_pgo->keyPoses()[i].r_global);
+                const V3D t = m_pgo->keyPoses()[i].t_global;
+                poses << patch_name << " " << t.x() << " " << t.y() << " " << t.z() << " "
+                      << q.w() << " " << q.x() << " " << q.y() << " " << q.z() << "\n";
             }
-
-            std::filesystem::create_directories(patches_dir);
-
-            if (std::filesystem::exists(poses_txt_path))
-            {
-                std::filesystem::remove(poses_txt_path);
-            }
-            RCLCPP_INFO(this->get_logger(), "Patches Path: %s", patches_dir.string().c_str());
+            poses.flush();
+            if (!poses) throw std::runtime_error("failed to write poses.txt");
+            poses.close();
+            save.sealExistingFile("poses.txt");
+            save.write("places.yaml", m_place_index.serialize());
+            const std::string place_index_checksum = map_tools::fileChecksum(
+                save.stagingPath() / "places.yaml");
+            YAML::Emitter manifest;
+            manifest << YAML::BeginMap
+                     << YAML::Key << "schema_version" << YAML::Value << 1
+                     << YAML::Key << "artifact_type" << YAML::Value << "keyframe_stream"
+                     << YAML::Key << "map_id" << YAML::Value << m_node_config.map_id
+                     << YAML::Key << "generation" << YAML::Value << generation
+                     << YAML::Key << "frame_id" << YAML::Value << m_node_config.map_frame
+                     << YAML::Key << "level_id" << YAML::Value << m_node_config.level_id
+                     << YAML::Key << "keyframe_count" << YAML::Value << m_pgo->keyPoses().size()
+                     << YAML::Key << "keyframe_index" << YAML::Value << "places.yaml"
+                     << YAML::Key << "keyframe_index_checksum" << YAML::Value << place_index_checksum
+                     << YAML::Key << "patches" << YAML::Value << YAML::BeginSeq;
+            for (const auto & patch : patch_checksums)
+                manifest << YAML::BeginMap << YAML::Key << "file" << YAML::Value << patch.first
+                         << YAML::Key << "checksum" << YAML::Value << patch.second << YAML::EndMap;
+            manifest << YAML::EndSeq << YAML::EndMap;
+            save.publish(manifest.c_str());
+            response->success = true;
+            response->message = "SAVED GENERATION " + std::to_string(generation) +
+                "; RUN tile_builder_node OFFLINE BEFORE LOCALIZATION";
         }
-        RCLCPP_INFO(this->get_logger(), "SAVE MAP TO %s", map_path.string().c_str());
-
-        std::ofstream txt_file(poses_txt_path);
-
-        CloudType::Ptr ret(new CloudType);
-        for (size_t i = 0; i < m_pgo->keyPoses().size(); i++)
+        catch (const std::exception & error)
         {
-
-            CloudType::Ptr body_cloud = m_pgo->keyPoses()[i].body_cloud;
-            if (request->save_patches)
-            {
-                std::string patch_name = std::to_string(i) + ".pcd";
-                std::filesystem::path patch_path = patches_dir / patch_name;
-                pcl::io::savePCDFileBinary(patch_path.string(), *body_cloud);
-                Eigen::Quaterniond q(m_pgo->keyPoses()[i].r_global);
-                V3D t = m_pgo->keyPoses()[i].t_global;
-                txt_file << patch_name << " " << t.x() << " " << t.y() << " " << t.z() << " " << q.w() << " " << q.x() << " " << q.y() << " " << q.z() << std::endl;
-            }
-            CloudType::Ptr world_cloud(new CloudType);
-            pcl::transformPointCloud(*body_cloud, *world_cloud, m_pgo->keyPoses()[i].t_global, Eigen::Quaterniond(m_pgo->keyPoses()[i].r_global));
-            *ret += *world_cloud;
+            response->success = false;
+            response->message = error.what();
         }
-        txt_file.close();
-        pcl::io::savePCDFileBinary(map_path.string(), *ret);
-        response->success = true;
-        response->message = "SAVE SUCCESS!";
     }
 
 private:
     NodeConfig m_node_config;
     Config m_pgo_config;
     NodeState m_state;
+    pgo::LatestValueSlot<PendingMeasurement> m_pending_measurement;
+    place_recognition::PlaceIndex m_place_index{{20, 60, 80.0, 3}};
     std::shared_ptr<SimplePGO> m_pgo;
     rclcpp::TimerBase::SharedPtr m_timer;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr m_loop_marker_pub;

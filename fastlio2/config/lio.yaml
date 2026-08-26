@@ -3,6 +3,23 @@ lidar_topic: /livox/lidar
 body_frame: body
 world_frame: lidar
 print_time_cost: false
+publish_world_cloud: false
+max_path_poses: 2000
+path_publish_stride: 5
+
+# Livox raw IMU acceleration is reported in g. Use 1.0 for sources already
+# publishing SI acceleration in m/s^2.
+sensor:
+  imu_acc_scale: 9.80665
+  max_imu_gap_ms: 20
+  max_lidar_gap_ms: 200
+  max_acceleration_mps2: 200.0
+  max_angular_velocity_rps: 20.0
+  max_imu_buffer_seconds: 2.0
+  max_lidar_buffer_frames: 3
+  require_stationary_init: true
+  max_init_gyro_stddev: 0.02
+  max_init_acc_stddev: 0.15
 
 lidar_filter_num: 6
 lidar_min_range: 0.5

@@ -1,5 +1,7 @@
 #include "imu_processor.h"
 
+#include "fastlio2/sensor_contract.h"
+
 IMUProcessor::IMUProcessor(Config &config, std::shared_ptr<IESKF> kf) : m_config(config), m_kf(kf)
 {
     m_Q.setIdentity();
@@ -16,8 +18,33 @@ IMUProcessor::IMUProcessor(Config &config, std::shared_ptr<IESKF> kf) : m_config
 bool IMUProcessor::initialize(SyncPackage &package)
 {
     m_imu_cache.insert(m_imu_cache.end(), package.imus.begin(), package.imus.end());
+    const size_t max_init_samples = std::max<size_t>(
+        static_cast<size_t>(m_config.imu_init_num),
+        static_cast<size_t>(m_config.imu_init_num) * 5U);
+    if (m_imu_cache.size() > max_init_samples)
+        m_imu_cache.erase(m_imu_cache.begin(), m_imu_cache.end() - max_init_samples);
     if (m_imu_cache.size() < static_cast<size_t>(m_config.imu_init_num))
         return false;
+
+    if (m_config.require_stationary_init)
+    {
+        fastlio2::SensorContractConfig contract_config;
+        contract_config.require_stationary_init = true;
+        contract_config.max_init_acc_stddev = m_config.max_init_acc_stddev;
+        contract_config.max_init_gyro_stddev = m_config.max_init_gyro_stddev;
+        fastlio2::SensorContract contract(contract_config);
+        std::vector<fastlio2::Vector3Sample> accelerations;
+        std::vector<fastlio2::Vector3Sample> angular_velocities;
+        accelerations.reserve(m_imu_cache.size());
+        angular_velocities.reserve(m_imu_cache.size());
+        for (const auto &imu : m_imu_cache)
+        {
+            accelerations.push_back({imu.acc.x(), imu.acc.y(), imu.acc.z()});
+            angular_velocities.push_back({imu.gyro.x(), imu.gyro.y(), imu.gyro.z()});
+        }
+        if (!contract.isStationary(accelerations, angular_velocities))
+            return false;
+    }
     V3D acc_mean = V3D::Zero();
     V3D gyro_mean = V3D::Zero();
     for (const auto &imu : m_imu_cache)
@@ -50,6 +77,9 @@ bool IMUProcessor::initialize(SyncPackage &package)
 
 void IMUProcessor::undistort(SyncPackage &package)
 {
+
+    if (package.imus.empty() || !package.cloud || package.cloud->empty())
+        return;
 
     m_imu_cache.clear();
     m_imu_cache.push_back(m_last_imu);
@@ -85,6 +115,8 @@ void IMUProcessor::undistort(SyncPackage &package)
 
         inp.acc = acc_val;
         inp.gyro = gyro_val;
+        if (dt <= 0.0)
+            continue;
         m_kf->predict(inp, dt, m_Q);
 
         m_last_gyro = gyro_val - m_kf->x().bg;
@@ -94,7 +126,8 @@ void IMUProcessor::undistort(SyncPackage &package)
     }
 
     dt = propagate_time_end - imu_time_end;
-    m_kf->predict(inp, dt, m_Q);
+    if (dt > 0.0)
+        m_kf->predict(inp, dt, m_Q);
     m_last_imu = m_imu_cache.back();
     m_last_propagate_end_time = propagate_time_end;
 
