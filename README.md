@@ -6,8 +6,8 @@
 4. 增加一致性地图优化，基于[BLAM](https://github.com/hku-mars/BALM) (小场景地图) 和[HBA](https://github.com/hku-mars/HBA) (大场景地图)
 
 ## 环境依赖
-1. Ubuntu 22.04
-2. ROS2 Humble
+1. Ubuntu 24.04
+2. ROS2 Jazzy
 
 ## 编译依赖
 ```text
@@ -34,8 +34,8 @@ sudo make install
 mkdir -r ws_livox/src
 git clone https://github.com/Livox-SDK/livox_ros_driver2.git ws_livox/src/livox_ros_driver2
 cd ws_livox/src/livox_ros_driver2
-source /opt/ros/humble/setup.sh
-./build.sh humble
+source /opt/ros/jazzy/setup.sh
+./build.sh jazzy
 ```
 
 ### 3.编译 Sophus

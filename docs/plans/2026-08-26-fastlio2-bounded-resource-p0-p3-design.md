@@ -1,8 +1,8 @@
-# FASTLIO2 RK3588 P0–P3 Optimization Design
+# FASTLIO2 Bounded-Resource P0–P3 Optimization Design
 
 ## 1. Purpose
 
-This design hardens the existing FASTLIO2 ROS2 repository for online use on RK3588 with LiDAR and IMU only. It targets mixed environments, including indoor warehouses, long corridors, underground parking, tunnels, and outdoor areas, with a single map covering at least 100,000 m².
+This design hardens the existing FASTLIO2 ROS 2 Jazzy repository for bounded-resource online use with LiDAR and IMU only. It targets mixed environments, including indoor warehouses, long corridors, underground parking, tunnels, and outdoor areas, with a single map covering at least 100,000 m².
 
 The system cannot mathematically guarantee drift-free localization under every LiDAR/IMU observability failure. The engineering target is therefore:
 
@@ -21,7 +21,7 @@ The system cannot mathematically guarantee drift-free localization under every L
 - P1 25 m map tiling, bounded local-map cache, latest-only work queues, and message-path reduction;
 - P2 small_gicp-based local registration, registration quality gates, asynchronous workers, and localization health states;
 - P3 Scan Context loop/relocalization candidate retrieval, on-demand global registration, robust loop factors, and incremental pose updates;
-- RK3588 performance instrumentation and bag-based acceptance tests.
+- platform-neutral performance instrumentation and bag-based acceptance tests.
 
 ### Excluded
 
@@ -88,9 +88,18 @@ map_directory/
     tile_0_0.pcd
     tile_0_1.pcd
     ...
+  keyframes/
+    keyframe_000001.pcd
+    ...
+  place_index/
+    descriptors.bin
+    search_index.bin
+    keyframes.yaml
 ```
 
-`manifest.yaml` records format version, frame, tile size, source resolution, map bounds, and available tile coordinates. A build utility converts a monolithic PCD into this representation. Monolithic PCD input remains available as a compatibility path but is not the production path for maps at or above 100,000 m².
+`manifest.yaml` records format version, frame, tile size, source resolution, map bounds, available tile coordinates, map-content hash, and place-index version. The offline map builder also stores map keyframes or local submaps, their map poses, Scan Context descriptors, the candidate-search index, and descriptor-to-tile associations.
+
+The preferred input is the saved keyframe patches and poses produced during mapping. A monolithic PCD can still be split into tiles for compatibility, but without viewpoint-bearing keyframes it cannot reliably reconstruct a place-recognition database. Such legacy maps support rough-pose initialization and local tracking; arbitrary-pose automatic global relocalization is not promised until a compatible place index is rebuilt from suitable source data.
 
 ### 4.3 Active window
 
@@ -135,11 +144,20 @@ Initial transition policy:
 
 All counts and durations are YAML parameters.
 
+### Initialization and recovery paths
+
+The localizer supports two explicit paths:
+
+1. **Rough-pose path:** a service, action, or ROS 2 `/initialpose` adapter supplies an approximate 6DoF pose. The localizer selects the corresponding 25 m tiles, runs coarse-to-fine local GICP, applies the quality gate, and enters `RECOVERING` before `TRACKING`.
+2. **Automatic path:** with no usable initial pose, or after entering `LOST`, the localizer queries the prebuilt map place index, evaluates the top three Scan Context candidates, performs robust global registration only for those candidates, refines with GICP, and requires three consistent keyframes before entering `TRACKING`.
+
+Both paths keep FASTLIO2 local odometry available. They differ only in candidate generation; neither may publish a trusted global pose before geometric and temporal confirmation.
+
 ## 7. Registration and Quality Gates
 
 ### 7.1 Normal tracking
 
-Normal tracking uses a low-rate local GICP/VGICP registration against the cached 3×3 local map. Initial settings for RK3588 are:
+Normal tracking uses a low-rate local GICP/VGICP registration against the cached 3×3 local map. Initial settings for the target bounded-resource platform are:
 
 - update rate: 1 Hz;
 - worker threads: 2;
@@ -170,7 +188,7 @@ Every rejection records a machine-readable reason.
 
 ### 7.3 Global recovery and loop closure
 
-Scan Context is computed for admitted keyframes and retrieves the top three candidates while excluding temporally adjacent frames. Scan Context proposes candidates only; it never creates a graph factor by itself.
+One ROS-independent `place_recognition` library owns Scan Context descriptors and candidate indexes. PGO uses it for online loop candidates; the localizer uses a versioned prebuilt-map index for startup and LOST recovery. Scan Context retrieves the top three candidates and proposes candidates only; it never creates a graph factor by itself.
 
 In `LOST` or initial localization, a robust global registration stage runs on demand, followed by GICP refinement and the same quality gate. This heavy path must not run continuously during `TRACKING`.
 
@@ -196,11 +214,11 @@ HBA is removed from the online launch path. Before it remains available as an of
 - construct valid symmetric positive-definite factor information;
 - report running, success, and failure states accurately.
 
-## 10. RK3588 Performance Budget
+## 10. Bounded-Resource Performance Budget
 
 - FASTLIO2 processing P99 is below one LiDAR frame period.
 - Local GICP runs at 1 Hz by default and has P95 latency at or below 250 ms on the target dataset.
-- Local GICP uses at most two Cortex-A76 worker threads by default.
+- Local GICP uses at most two worker threads by default.
 - Backend pending work never exceeds one item per worker.
 - Tile I/O and search-structure construction never execute on the FASTLIO2 callback path.
 - Online process RSS stays below 2 GB for the 100,000 m² acceptance map.
