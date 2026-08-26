@@ -26,16 +26,21 @@ find_package(message_filters REQUIRED)
 find_package(rclcpp_components REQUIRED)
 find_package(visualization_msgs REQUIRED)
 
-find_package(GTSAM REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(PCL REQUIRED)
 find_package(interface REQUIRED)
 find_package(yaml-cpp REQUIRED)
 
+# Ubuntu 24.04's GTSAM package exports an unavailable CppUnitLite test target.
+# Locate only the production headers and shared library used by this package.
+find_path(GTSAM_INCLUDE_DIR gtsam/nonlinear/ISAM2.h REQUIRED)
+find_library(GTSAM_LIBRARY NAMES gtsam REQUIRED)
+
 
 
 include_directories(
   ${EIGEN3_INCLUDE_DIR}
+  ${GTSAM_INCLUDE_DIR}
   ${PCL_INCLUDE_DIRS}
 )
 
@@ -43,8 +48,8 @@ set(SRC_LIST src/pgos/commons.cpp
              src/pgos/simple_pgo.cpp)
 
 add_executable(pgo_node src/pgo_node.cpp ${SRC_LIST})
-ament_target_dependencies(pgo_node rclcpp std_msgs sensor_msgs nav_msgs message_filters pcl_conversions tf2_ros geometry_msgs visualization_msgs interface GTSAM)
-target_link_libraries(pgo_node ${PCL_LIBRARIES} gtsam yaml-cpp)
+ament_target_dependencies(pgo_node rclcpp std_msgs sensor_msgs nav_msgs message_filters pcl_conversions tf2_ros geometry_msgs visualization_msgs interface)
+target_link_libraries(pgo_node ${PCL_LIBRARIES} ${GTSAM_LIBRARY} yaml-cpp)
 
 
 install(TARGETS pgo_node DESTINATION lib/${PROJECT_NAME})
@@ -54,6 +59,7 @@ install(DIRECTORY rviz DESTINATION share/${PROJECT_NAME})
 
 
 if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
   find_package(ament_lint_auto REQUIRED)
   # the following line skips the linter which checks for copyrights
   # comment the line when a copyright and license is added to all source files
@@ -63,6 +69,11 @@ if(BUILD_TESTING)
   # a copyright and license is added to all source files
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
+
+  ament_add_gtest(test_smoke test/test_smoke.cpp)
+  if(TARGET test_smoke)
+    ament_target_dependencies(test_smoke interface)
+  endif()
 endif()
 
 ament_package()

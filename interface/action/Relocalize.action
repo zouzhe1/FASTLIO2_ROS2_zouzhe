@@ -1,0 +1,15 @@
+uint8 AUTO=0
+uint8 ROUGH_POSE=1
+uint8 mode
+string map_path
+geometry_msgs/PoseWithCovarianceStamped initial_pose
+---
+bool success
+uint8 final_state
+string message
+geometry_msgs/PoseWithCovarianceStamped pose
+---
+uint8 state
+uint32 candidates_tested
+float32 best_score
+float32 elapsed_sec

@@ -1,0 +1,52 @@
+name: ROS 2 Jazzy
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  core-build-and-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add ROS 2 repository
+        uses: ros-tooling/setup-ros@v0.7
+        with:
+          required-ros-distributions: jazzy
+
+      - name: Install core dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtsam-dev \
+            libpcl-dev \
+            libyaml-cpp-dev \
+            python3-colcon-common-extensions \
+            ros-jazzy-ament-cmake-gtest \
+            ros-jazzy-message-filters \
+            ros-jazzy-pcl-conversions \
+            ros-jazzy-rclcpp \
+            ros-jazzy-tf2-ros
+
+      - name: Build core packages
+        shell: bash
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          colcon build \
+            --packages-up-to localizer pgo \
+            --cmake-args -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
+
+      - name: Test core packages
+        shell: bash
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          source install/setup.bash
+          colcon test \
+            --packages-select localizer pgo \
+            --event-handlers console_direct+ \
+            --ctest-args -R test_smoke
+          colcon test-result --verbose
+
+  # The FASTLIO2 front-end needs the vendor Livox driver/SDK. The deployment
+  # workspace job added in the final integration task builds that complete set.
