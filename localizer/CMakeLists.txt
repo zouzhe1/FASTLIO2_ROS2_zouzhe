@@ -29,6 +29,7 @@ add_library(localization_core
   src/small_gicp_backend.cpp
   src/registration_quality_gate.cpp
   src/latest_registration.cpp
+  src/global_recovery.cpp
 )
 target_include_directories(localization_core
   PUBLIC
@@ -46,6 +47,8 @@ find_package(geometry_msgs REQUIRED)
 find_package(message_filters REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(pcl_conversions REQUIRED)
+find_package(rclcpp_action REQUIRED)
+find_package(place_recognition REQUIRED)
 
 find_package(Eigen3 REQUIRED)
 find_package(PCL REQUIRED)
@@ -63,7 +66,7 @@ set(SRC_LIST src/localizers/commons.cpp
              src/localizers/icp_localizer.cpp)
 
 add_executable(localizer_node src/localizer_node.cpp ${SRC_LIST})
-ament_target_dependencies(localizer_node rclcpp std_msgs sensor_msgs nav_msgs message_filters pcl_conversions tf2_ros geometry_msgs interface)
+ament_target_dependencies(localizer_node rclcpp rclcpp_action std_msgs sensor_msgs nav_msgs message_filters pcl_conversions tf2_ros geometry_msgs interface place_recognition map_tools)
 target_link_libraries(localizer_node localization_core ${PCL_LIBRARIES} yaml-cpp)
 
 
@@ -131,6 +134,10 @@ if(BUILD_TESTING)
   ament_add_gtest(test_latest_registration test/test_latest_registration.cpp)
   if(TARGET test_latest_registration)
     target_link_libraries(test_latest_registration localization_core)
+  endif()
+  ament_add_gtest(test_global_recovery test/test_global_recovery.cpp)
+  if(TARGET test_global_recovery)
+    target_link_libraries(test_global_recovery localization_core)
   endif()
 
   ament_add_pytest_test(

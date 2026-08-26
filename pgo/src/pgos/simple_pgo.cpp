@@ -166,6 +166,13 @@ void SimplePGO::searchForLoopPairs()
         return;
 
     M4F loop_transform = m_icp.getFinalTransformation();
+    const Eigen::AngleAxisf loop_rotation(loop_transform.block<3, 3>(0, 0));
+    const pgo::LoopEvidence evidence{
+        cur_idx, static_cast<std::uint64_t>(loop_idx), 0.0, 1.0, true,
+        m_icp.getFitnessScore(), loop_transform.block<3, 1>(0, 3).norm(),
+        std::abs(loop_rotation.angle()) * 57.29577951308232};
+    if (!m_loop_verifier.verify(evidence, last_item.time).accepted)
+        return;
 
     LoopPair one_pair;
     one_pair.source_id = cur_idx;

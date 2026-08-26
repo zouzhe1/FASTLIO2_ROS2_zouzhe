@@ -47,7 +47,8 @@ if(PGO_BUILD_NODE)
   )
 
   set(SRC_LIST src/pgos/commons.cpp
-               src/pgos/simple_pgo.cpp)
+               src/pgos/simple_pgo.cpp
+               src/loop_verifier.cpp)
 
   add_executable(pgo_node src/pgo_node.cpp ${SRC_LIST})
   ament_target_dependencies(pgo_node rclcpp std_msgs sensor_msgs nav_msgs message_filters pcl_conversions tf2_ros geometry_msgs visualization_msgs interface map_tools place_recognition)
@@ -85,6 +86,10 @@ if(BUILD_TESTING)
   ament_add_gtest(test_factor_noise test/test_factor_noise.cpp)
   if(TARGET test_factor_noise)
     target_include_directories(test_factor_noise PRIVATE include)
+  endif()
+  ament_add_gtest(test_loop_verifier test/test_loop_verifier.cpp src/loop_verifier.cpp)
+  if(TARGET test_loop_verifier)
+    target_include_directories(test_loop_verifier PRIVATE include)
   endif()
 endif()
 

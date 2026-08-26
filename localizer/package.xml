@@ -19,6 +19,8 @@
   <depend>interface</depend>
   <depend>map_tools</depend>
   <depend>small_gicp_vendor</depend>
+  <depend>rclcpp_action</depend>
+  <depend>place_recognition</depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

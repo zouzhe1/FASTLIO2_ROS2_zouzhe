@@ -12,6 +12,7 @@
 #include <gtsam/slam/BetweenFactor.h>
 #include <gtsam/nonlinear/NonlinearFactorGraph.h>
 #include "pgo/factor_noise.h"
+#include "pgo/loop_verifier.h"
 
 struct KeyPoseWithCloud
 {
@@ -77,4 +78,5 @@ private:
     gtsam::Values m_initial_values;
     gtsam::NonlinearFactorGraph m_graph;
     pcl::IterativeClosestPoint<PointType, PointType> m_icp;
+    pgo::LoopVerifier m_loop_verifier{{0.15, 0.15, 5.0, 45.0, 3, 60.0, 0.15}};
 };
