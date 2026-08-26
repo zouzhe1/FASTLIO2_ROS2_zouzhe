@@ -117,6 +117,15 @@ ValidationResult validateManifest(
   if (manifest.map_id.empty()) return fail("map_id is required");
   if (manifest.frame_id != expected_frame) return fail("frame mismatch");
   if (manifest.tile_size_m <= 0.0) return fail("invalid tile size");
+  if (manifest.keyframe_index.empty()) return fail("keyframe index is required");
+  const auto safe_relative = [](const std::filesystem::path & path) {
+    if (path.empty() || path.is_absolute()) return false;
+    return std::none_of(path.begin(), path.end(), [](const auto & part) {return part == "..";});
+  };
+  if (!safe_relative(manifest.keyframe_index)) return fail("unsafe keyframe index path");
+  if (!root.empty() && !std::filesystem::is_regular_file(root / manifest.keyframe_index)) {
+    return fail("missing keyframe index");
+  }
   std::set<std::string> level_ids;
   for (const auto & level : manifest.levels) {
     if (level.id.empty() || level.z_min >= level.z_max || !level_ids.insert(level.id).second) {
@@ -134,7 +143,7 @@ ValidationResult validateManifest(
   for (const auto & tile : manifest.tiles) {
     if (!ids.insert(tile.id).second) return fail("duplicate tile id");
     if (level_ids.count(tile.id.level_id) == 0) return fail("tile references unknown level");
-    if (tile.file.empty() || tile.checksum.empty() || tile.point_count == 0 || tile.voxel_size <= 0.0) {
+    if (!safe_relative(tile.file) || tile.checksum.empty() || tile.point_count == 0 || tile.voxel_size <= 0.0) {
       return fail("tile metadata incomplete");
     }
     if (!root.empty()) {

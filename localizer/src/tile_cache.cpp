@@ -33,7 +33,7 @@ bool TileCache::makeRoomLocked(std::size_t incoming_bytes)
     if (candidate == lru_.rend()) return false;
     const auto id = *candidate;
     const auto entry = entries_.find(id);
-    stats_.bytes -= entry->second.data->bytes.size();
+    stats_.bytes -= entry->second.data->sizeBytes();
     lru_.erase(entry->second.lru);
     entries_.erase(entry);
     ++stats_.evictions;
@@ -83,7 +83,7 @@ TileLoadResult TileCache::getImpl(
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (result.status == TileLoadStatus::OK) {
-      const auto bytes = result.data->bytes.size();
+      const auto bytes = result.data->sizeBytes();
       if (!makeRoomLocked(bytes)) {
         result = {TileLoadStatus::BUDGET_EXCEEDED, {}, "all eviction candidates are pinned"};
       } else {
@@ -107,7 +107,7 @@ void TileCache::setActiveLevel(std::string level_id)
   active_level_ = std::move(level_id);
   for (auto entry = entries_.begin(); entry != entries_.end();) {
     if (entry->first.level_id != active_level_ && entry->second.data.use_count() == 1) {
-      stats_.bytes -= entry->second.data->bytes.size();
+      stats_.bytes -= entry->second.data->sizeBytes();
       lru_.erase(entry->second.lru);
       entry = entries_.erase(entry);
       ++stats_.evictions;

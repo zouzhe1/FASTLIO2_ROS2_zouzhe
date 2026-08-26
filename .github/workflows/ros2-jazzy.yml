@@ -55,11 +55,14 @@ jobs:
             libpcl-dev \
             libyaml-cpp-dev \
             python3-colcon-common-extensions \
+            python3-pytest \
             ros-jazzy-ament-cmake-gtest \
             ros-jazzy-ament-cmake-pytest \
             ros-jazzy-message-filters \
             ros-jazzy-pcl-conversions \
             ros-jazzy-rclcpp \
+            ros-jazzy-rclcpp-action \
+            ros-jazzy-small-gicp-vendor \
             ros-jazzy-tf2-ros
 
       - name: Build core packages
@@ -67,7 +70,7 @@ jobs:
         run: |
           source /opt/ros/jazzy/setup.bash
           colcon build \
-            --packages-up-to localizer pgo \
+            --packages-up-to place_recognition map_tools localizer pgo \
             --cmake-args -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
 
       - name: Test core packages
@@ -76,10 +79,17 @@ jobs:
           source /opt/ros/jazzy/setup.bash
           source install/setup.bash
           colcon test \
-            --packages-select localizer pgo \
+            --packages-select place_recognition map_tools localizer pgo \
             --event-handlers console_direct+ \
-            --ctest-args -R 'test_smoke|test_localization_state_machine|test_tf_policy|test_tf_owner_launch'
+            --ctest-args -R 'test_smoke|test_localization_state_machine|test_tf_policy|test_tf_owner_launch|test_tile|test_map_manifest|test_transactional|test_registration|test_latest|test_place_index|test_global_recovery|test_loop_verifier'
           colcon test-result --verbose
+
+      - name: Test transport and benchmark harness
+        shell: bash
+        run: |
+          python3 -m pytest -q \
+            test/system/test_transport_bounds.py \
+            test/benchmark/test_run_benchmark.py
 
   # The FASTLIO2 front-end needs the vendor Livox driver/SDK. The deployment
   # workspace job added in the final integration task builds that complete set.

@@ -71,6 +71,7 @@ TEST(MapManifest, RejectsMissingFileAndChecksumMismatchBeforePointLoading)
   EXPECT_FALSE(map_tools::validateManifest(manifest, root, "map", true).ok);
 
   std::ofstream(root / manifest.tiles[0].file) << "tile-data";
+  std::ofstream(root / manifest.keyframe_index) << "place-index";
   manifest.tiles[0].checksum = "wrong";
   EXPECT_FALSE(map_tools::validateManifest(manifest, root, "map", true).ok);
   manifest.tiles[0].checksum = map_tools::fileChecksum(root / manifest.tiles[0].file);

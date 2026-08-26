@@ -31,7 +31,10 @@ struct TileData
 {
   map_tools::TileId id;
   std::vector<std::uint8_t> bytes;
+  std::shared_ptr<const void> payload;
+  std::size_t resident_bytes{0};
   std::string checksum;
+  std::size_t sizeBytes() const {return resident_bytes ? resident_bytes : bytes.size();}
 };
 
 struct TileLoadResult

@@ -5,6 +5,7 @@
 #include <atomic>
 #include <fstream>
 #include <thread>
+#include <optional>
 #include <algorithm>
 #include <cstdint>
 #include <stdexcept>
@@ -32,6 +33,7 @@
 #include "localizer/latest_registration.h"
 #include "localizer/registration_quality_gate.h"
 #include "localizer/global_recovery.h"
+#include "localizer/tile_cache.h"
 #include "map_tools/map_manifest.h"
 #include "map_tools/tile_id.h"
 #include "map_tools/transactional_generation.h"
@@ -54,6 +56,8 @@ struct NodeConfig
     double trusted_timeout_seconds = 5.0;
     size_t recovery_consistent_frames = 3;
     bool publish_map_cloud = false;
+    std::size_t tile_cache_max_tiles = 12;
+    std::size_t tile_cache_max_bytes = 268435456;
 };
 
 struct NodeState
@@ -81,6 +85,7 @@ struct RegistrationContext
     builtin_interfaces::msg::Time stamp;
     Eigen::Isometry3d initial_guess = Eigen::Isometry3d::Identity();
     bool recovery = false;
+    bool tiles_complete = true;
 };
 
 class LocalizerNode : public rclcpp::Node
@@ -115,6 +120,9 @@ public:
         m_sync->registerCallback(std::bind(&LocalizerNode::syncCB, this, std::placeholders::_1, std::placeholders::_2));
         m_localizer = std::make_shared<ICPLocalizer>(m_localizer_config);
         m_registration = std::make_shared<localizer::SmallGicpBackend>(m_registration_config);
+        m_tile_cache = std::make_unique<localizer::TileCache>(
+            localizer::TileCacheLimits{
+                m_config.tile_cache_max_tiles, m_config.tile_cache_max_bytes}, "");
 
         m_reloc_srv = this->create_service<interface::srv::Relocalize>("relocalize", std::bind(&LocalizerNode::relocCB, this, std::placeholders::_1, std::placeholders::_2));
 
@@ -189,6 +197,13 @@ public:
             for (const auto & point : *m_localizer->refineMap())
                 target.emplace_back(point.x, point.y, point.z);
             m_registration->setTarget(target, std::hash<std::string>{}(requested.string()));
+            std::lock_guard<std::mutex> map_lock(m_map_mutex);
+            m_active_generation_root.clear();
+            m_active_manifest = {};
+            m_active_neighborhood.reset();
+            m_active_map_id.clear();
+            m_active_map_generation = 0;
+            m_active_level_id.clear();
         }
         else
         {
@@ -332,9 +347,16 @@ public:
                 return false;
             }
             m_registration->setTarget(target, manifest.generation);
-            m_active_map_id = manifest.map_id;
-            m_active_map_generation = manifest.generation;
-            m_active_level_id = level_id;
+            {
+                std::lock_guard<std::mutex> map_lock(m_map_mutex);
+                m_active_map_id = manifest.map_id;
+                m_active_map_generation = manifest.generation;
+                m_active_level_id = level_id;
+                m_active_generation_root = generation;
+                m_active_manifest = manifest;
+                m_active_neighborhood.reset();
+                m_tile_cache->setActiveLevel(level_id);
+            }
         }
 
         if (goal.mode == RelocalizeAction::Goal::ROUGH_POSE)
@@ -348,6 +370,71 @@ public:
                 .normalized().toRotationMatrix();
         }
         return true;
+    }
+
+    bool refreshTileNeighborhood(double map_x, double map_y)
+    {
+        std::lock_guard<std::mutex> map_lock(m_map_mutex);
+        if (m_active_generation_root.empty()) return true;
+        const auto centre = map_tools::tileForPoint(m_active_level_id, map_x, map_y);
+        if (m_active_neighborhood && *m_active_neighborhood == centre) return true;
+
+        std::vector<std::shared_ptr<const localizer::TileData>> leases;
+        std::uint64_t target_generation = m_active_manifest.generation;
+        bool complete = true;
+        for (int dx = -1; dx <= 1; ++dx)
+        {
+            for (int dy = -1; dy <= 1; ++dy)
+            {
+                const map_tools::TileId id{
+                    centre.level_id, centre.x + dx, centre.y + dy};
+                const auto record = std::find_if(
+                    m_active_manifest.tiles.begin(), m_active_manifest.tiles.end(),
+                    [&](const auto & tile) {return tile.id == id;});
+                if (record == m_active_manifest.tiles.end())
+                {
+                    continue;
+                }
+                auto loaded = m_tile_cache->get(id, record->checksum, [&](const auto &) {
+                    auto cloud = std::make_shared<CloudType>();
+                    if (pcl::io::loadPCDFile<PointType>(
+                        (m_active_generation_root / record->file).string(), *cloud) != 0)
+                        return localizer::TileLoadResult{
+                            localizer::TileLoadStatus::MISSING, {}, "tile read failed"};
+                    auto data = std::make_shared<localizer::TileData>();
+                    data->id = id;
+                    data->checksum = record->checksum;
+                    data->resident_bytes = cloud->size() * sizeof(PointType);
+                    data->payload = cloud;
+                    return localizer::TileLoadResult{
+                        localizer::TileLoadStatus::OK, data, "ok"};
+                });
+                if (loaded.status != localizer::TileLoadStatus::OK)
+                {
+                    complete = false;
+                    continue;
+                }
+                leases.push_back(loaded.data);
+                target_generation ^= std::hash<std::string>{}(id.stableKey()) +
+                    0x9e3779b97f4a7c15ULL + (target_generation << 6) + (target_generation >> 2);
+            }
+        }
+        if (leases.empty()) return false;
+        std::vector<Eigen::Vector3d> target;
+        target.reserve(m_registration_config.max_target_points);
+        for (const auto & lease : leases)
+        {
+            const auto cloud = std::static_pointer_cast<const CloudType>(lease->payload);
+            for (const auto & point : *cloud)
+            {
+                if (target.size() >= m_registration_config.max_target_points) break;
+                target.emplace_back(point.x, point.y, point.z);
+            }
+        }
+        m_registration->setTarget(target, target_generation);
+        m_active_neighborhood = centre;
+        m_active_tiles = static_cast<std::uint32_t>(leases.size());
+        return complete;
     }
 
     void executeRelocalize(const std::shared_ptr<RelocalizeGoalHandle> goal_handle)
@@ -458,6 +545,13 @@ public:
             m_config.recovery_consistent_frames = config["recovery_consistent_frames"].as<size_t>();
         if (config["publish_map_cloud"])
             m_config.publish_map_cloud = config["publish_map_cloud"].as<bool>();
+        if (config["tile_cache_max_tiles"])
+            m_config.tile_cache_max_tiles = config["tile_cache_max_tiles"].as<std::size_t>();
+        if (config["tile_cache_max_bytes"])
+            m_config.tile_cache_max_bytes = config["tile_cache_max_bytes"].as<std::size_t>();
+        if (m_config.update_hz <= 0.0 || m_config.tile_cache_max_tiles == 0 ||
+            m_config.tile_cache_max_bytes == 0)
+            throw std::runtime_error("localizer rates and cache bounds must be positive");
 
         m_localizer_config.rough_scan_resolution = config["rough_scan_resolution"].as<double>();
         m_localizer_config.rough_map_resolution = config["rough_map_resolution"].as<double>();
@@ -507,7 +601,7 @@ public:
             quality.correction_rotation_deg =
                 Eigen::AngleAxisd(correction.rotation()).angle() * 57.29577951308232;
             quality.elapsed_ms = registration.elapsed_ms;
-            quality.tiles_complete = true;
+            quality.tiles_complete = m_latest_context.tiles_complete;
             quality.ambiguity_margin = m_latest_context.recovery ? m_last_ambiguity_margin : 0.0;
             const auto decision = m_quality_gate.evaluate(
                 quality, m_latest_context.recovery ?
@@ -596,10 +690,13 @@ public:
 
         Eigen::Isometry3d guess = Eigen::Isometry3d::Identity();
         guess.matrix() = initial_guess.cast<double>();
+        const bool tiles_complete = refreshTileNeighborhood(
+            guess.translation().x(), guess.translation().y());
         m_latest_context = {
             current_local_r, current_local_t, current_time, guess,
             m_health.state() == localizer::LocalizationHealth::RELOCALIZING ||
-            m_health.state() == localizer::LocalizationHealth::RECOVERING};
+            m_health.state() == localizer::LocalizationHealth::RECOVERING,
+            tiles_complete};
         const std::uint64_t request_id = ++m_registration_sequence;
         const auto backend = m_registration;
         m_registration_worker.submit({
@@ -738,11 +835,21 @@ public:
         status.hessian_condition = static_cast<float>(m_last_registration.hessian_condition);
         status.registration_ms = static_cast<float>(m_last_registration.elapsed_ms);
         status.replaced_work_items = m_registration_worker.replacedCount();
-        status.map_id = m_active_map_id;
-        status.map_generation = m_active_map_generation;
-        status.level_id = m_active_level_id;
+        {
+            std::lock_guard<std::mutex> map_lock(m_map_mutex);
+            status.map_id = m_active_map_id;
+            status.map_generation = m_active_map_generation;
+            status.level_id = m_active_level_id;
+        }
         status.candidate_id = m_last_candidate_id;
         status.ambiguity_margin = static_cast<float>(m_last_ambiguity_margin);
+        if (m_tile_cache)
+        {
+            const auto cache = m_tile_cache->stats();
+            status.active_tiles = m_active_tiles;
+            status.cached_tiles = static_cast<std::uint32_t>(cache.tile_count);
+            status.cached_bytes = cache.bytes;
+        }
         status.accepted_relocalization_count = m_accepted_relocalizations.load();
         status.rejected_relocalization_count = m_rejected_relocalizations.load();
         if (m_health.lastTrustedTime() >= 0.0)
@@ -802,6 +909,7 @@ private:
     localizer::RegistrationConfig m_registration_config;
     std::shared_ptr<ICPLocalizer> m_localizer;
     std::shared_ptr<localizer::SmallGicpBackend> m_registration;
+    std::unique_ptr<localizer::TileCache> m_tile_cache;
     localizer::LatestRegistration m_registration_worker;
     localizer::RegistrationQualityGate m_quality_gate{{}};
     localizer::GlobalRecovery m_global_recovery{{3, 3000.0, 0.15, 3}};
@@ -833,6 +941,11 @@ private:
     double m_last_ambiguity_margin = 1.0;
     std::atomic<std::uint32_t> m_accepted_relocalizations{0};
     std::atomic<std::uint32_t> m_rejected_relocalizations{0};
+    std::mutex m_map_mutex;
+    std::filesystem::path m_active_generation_root;
+    map_tools::MapManifest m_active_manifest;
+    std::optional<map_tools::TileId> m_active_neighborhood;
+    std::uint32_t m_active_tiles = 0;
 };
 int main(int argc, char **argv)
 {
