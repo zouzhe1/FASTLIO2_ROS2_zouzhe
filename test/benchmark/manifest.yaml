@@ -1,0 +1,16 @@
+schema_version: 1
+acceptance_ready: false
+reason: Representative rosbag2 and surveyed ground truth are not stored in this repository.
+required_map_area_m2: 100000
+required_duration_minutes: 30
+required_scenarios:
+  - open_area
+  - repetitive_corridor
+  - turns_stops_occlusion
+  - sparse_geometry
+  - revisit_loops
+  - kidnapping_and_restart
+  - tile_and_level_boundaries
+  - same_xy_multiple_levels
+  - sensor_gap_saturation_timestamp_reset
+  - corrupt_map_and_interrupted_save
