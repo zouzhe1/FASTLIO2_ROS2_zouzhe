@@ -18,16 +18,19 @@ endif()
 # find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(interface REQUIRED)
+find_package(map_tools REQUIRED)
 
 add_library(localization_core
   src/localization_state_machine.cpp
   src/tf_policy.cpp
+  src/tile_cache.cpp
 )
 target_include_directories(localization_core
   PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
+ament_target_dependencies(localization_core map_tools)
 
 if(LOCALIZER_BUILD_NODE)
 find_package(std_msgs REQUIRED)
@@ -102,6 +105,11 @@ if(BUILD_TESTING)
   ament_add_gtest(test_tf_policy test/test_tf_policy.cpp)
   if(TARGET test_tf_policy)
     target_link_libraries(test_tf_policy localization_core)
+  endif()
+
+  ament_add_gtest(test_tile_cache test/test_tile_cache.cpp)
+  if(TARGET test_tile_cache)
+    target_link_libraries(test_tile_cache localization_core)
   endif()
 
   ament_add_pytest_test(

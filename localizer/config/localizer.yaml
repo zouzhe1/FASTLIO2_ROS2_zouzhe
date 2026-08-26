@@ -8,6 +8,12 @@ lost_after_failures: 5
 trusted_timeout_seconds: 5.0
 recovery_consistent_frames: 3
 
+tile_size_m: 25.0
+tile_neighborhood_radius: 1
+tile_cache_max_tiles: 12
+tile_cache_max_bytes: 268435456
+tile_prefetch_enabled: true
+
 rough_scan_resolution: 0.25
 rough_map_resolution: 0.25
 rough_max_iteration: 5
