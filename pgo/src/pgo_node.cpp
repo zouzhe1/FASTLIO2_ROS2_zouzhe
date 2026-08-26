@@ -10,9 +10,9 @@
 #include <pcl_conversions/pcl_conversions.h>
 #include <visualization_msgs/msg/marker_array.hpp>
 #include <visualization_msgs/msg/marker.hpp>
-#include <queue>
 #include <filesystem>
 #include <stdexcept>
+#include "pgo/latest_value_slot.h"
 #include "pgos/commons.h"
 #include "pgos/simple_pgo.h"
 #include "interface/srv/save_maps.hpp"
@@ -35,8 +35,13 @@ struct NodeConfig
 struct NodeState
 {
     std::mutex message_mutex;
-    std::queue<CloudWithPose> cloud_buffer;
     double last_message_time = -1.0;
+};
+
+struct PendingMeasurement
+{
+    sensor_msgs::msg::PointCloud2::ConstSharedPtr cloud_msg;
+    PoseWithTime pose;
 };
 
 class PGONode : public rclcpp::Node
@@ -92,29 +97,38 @@ public:
         m_pgo_config.loop_submap_half_range = config["loop_submap_half_range"].as<int>();
         m_pgo_config.submap_resolution = config["submap_resolution"].as<double>();
         m_pgo_config.min_loop_detect_duration = config["min_loop_detect_duration"].as<double>();
+        const YAML::Node noise = config["factor_noise"];
+        if (noise)
+        {
+            m_pgo_config.factor_noise.odometry_rotation_variance = noise["odometry_rotation_variance"].as<double>();
+            m_pgo_config.factor_noise.odometry_translation_variance = noise["odometry_translation_variance"].as<double>();
+            m_pgo_config.factor_noise.loop_rotation_scale = noise["loop_rotation_scale"].as<double>();
+            m_pgo_config.factor_noise.loop_translation_scale = noise["loop_translation_scale"].as<double>();
+            m_pgo_config.factor_noise.loop_score_min = noise["loop_score_min"].as<double>();
+            m_pgo_config.factor_noise.loop_score_max = noise["loop_score_max"].as<double>();
+        }
     }
     void syncCB(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud_msg, const nav_msgs::msg::Odometry::ConstSharedPtr &odom_msg)
     {
 
         std::lock_guard<std::mutex>(m_state.message_mutex);
-        CloudWithPose cp;
-        cp.pose.setTime(cloud_msg->header.stamp.sec, cloud_msg->header.stamp.nanosec);
-        if (cp.pose.second < m_state.last_message_time)
+        PendingMeasurement pending;
+        pending.pose.setTime(cloud_msg->header.stamp.sec, cloud_msg->header.stamp.nanosec);
+        if (pending.pose.second < m_state.last_message_time)
         {
             RCLCPP_WARN(this->get_logger(), "Received out of order message");
             return;
         }
-        m_state.last_message_time = cp.pose.second;
+        m_state.last_message_time = pending.pose.second;
 
-        cp.pose.r = Eigen::Quaterniond(odom_msg->pose.pose.orientation.w,
+        pending.pose.r = Eigen::Quaterniond(odom_msg->pose.pose.orientation.w,
                                        odom_msg->pose.pose.orientation.x,
                                        odom_msg->pose.pose.orientation.y,
                                        odom_msg->pose.pose.orientation.z)
                         .toRotationMatrix();
-        cp.pose.t = V3D(odom_msg->pose.pose.position.x, odom_msg->pose.pose.position.y, odom_msg->pose.pose.position.z);
-        cp.cloud = CloudType::Ptr(new CloudType);
-        pcl::fromROSMsg(*cloud_msg, *cp.cloud);
-        m_state.cloud_buffer.push(cp);
+        pending.pose.t = V3D(odom_msg->pose.pose.position.x, odom_msg->pose.pose.position.y, odom_msg->pose.pose.position.z);
+        pending.cloud_msg = cloud_msg;
+        m_pending_measurement.push(std::move(pending));
     }
 
     void sendBroadCastTF(builtin_interfaces::msg::Time &time)
@@ -203,20 +217,21 @@ public:
 
     void timerCB()
     {
-        if (m_state.cloud_buffer.size() == 0)
+        auto pending = m_pending_measurement.take();
+        if (!pending.has_value())
             return;
-        CloudWithPose cp = m_state.cloud_buffer.front();
-        // 清理队列
-        {
-            std::lock_guard<std::mutex>(m_state.message_mutex);
-            while (!m_state.cloud_buffer.empty())
-            {
-                m_state.cloud_buffer.pop();
-            }
-        }
+        CloudWithPose cp;
+        cp.pose = pending->pose;
         builtin_interfaces::msg::Time cur_time;
         cur_time.sec = cp.pose.sec;
         cur_time.nanosec = cp.pose.nsec;
+        if (!m_pgo->isKeyPose(cp.pose))
+        {
+            sendBroadCastTF(cur_time);
+            return;
+        }
+        cp.cloud = CloudType::Ptr(new CloudType);
+        pcl::fromROSMsg(*pending->cloud_msg, *cp.cloud);
         if (!m_pgo->addKeyPose(cp))
         {
 
@@ -301,6 +316,7 @@ private:
     NodeConfig m_node_config;
     Config m_pgo_config;
     NodeState m_state;
+    pgo::LatestValueSlot<PendingMeasurement> m_pending_measurement;
     std::shared_ptr<SimplePGO> m_pgo;
     rclcpp::TimerBase::SharedPtr m_timer;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr m_loop_marker_pub;

@@ -11,6 +11,7 @@
 #include <gtsam/slam/PriorFactor.h>
 #include <gtsam/slam/BetweenFactor.h>
 #include <gtsam/nonlinear/NonlinearFactorGraph.h>
+#include "pgo/factor_noise.h"
 
 struct KeyPoseWithCloud
 {
@@ -40,6 +41,7 @@ struct Config
     int loop_submap_half_range = 5;
     double submap_resolution = 0.1;
     double min_loop_detect_duration = 10.0;
+    pgo::FactorNoiseConfig factor_noise;
 };
 
 class SimplePGO

@@ -14,48 +14,48 @@ endif()
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
-find_package(std_msgs REQUIRED)
-find_package(rclcpp REQUIRED)
-find_package(nav_msgs REQUIRED)
-find_package(tf2_ros REQUIRED)
-find_package(pcl_conversions REQUIRED)
-find_package(sensor_msgs REQUIRED)
-find_package(nav_msgs REQUIRED)
-find_package(geometry_msgs REQUIRED)
-find_package(message_filters REQUIRED)
-find_package(rclcpp_components REQUIRED)
-find_package(visualization_msgs REQUIRED)
-
-find_package(Eigen3 REQUIRED)
-find_package(PCL REQUIRED)
 find_package(interface REQUIRED)
-find_package(yaml-cpp REQUIRED)
+option(PGO_BUILD_NODE "Build the ROS PGO node" ON)
 
-# Ubuntu 24.04's GTSAM package exports an unavailable CppUnitLite test target.
-# Locate only the production headers and shared library used by this package.
-find_path(GTSAM_INCLUDE_DIR gtsam/nonlinear/ISAM2.h REQUIRED)
-find_library(GTSAM_LIBRARY NAMES gtsam REQUIRED)
+if(PGO_BUILD_NODE)
+  find_package(std_msgs REQUIRED)
+  find_package(rclcpp REQUIRED)
+  find_package(nav_msgs REQUIRED)
+  find_package(tf2_ros REQUIRED)
+  find_package(pcl_conversions REQUIRED)
+  find_package(sensor_msgs REQUIRED)
+  find_package(geometry_msgs REQUIRED)
+  find_package(message_filters REQUIRED)
+  find_package(rclcpp_components REQUIRED)
+  find_package(visualization_msgs REQUIRED)
+  find_package(Eigen3 REQUIRED)
+  find_package(PCL REQUIRED)
+  find_package(yaml-cpp REQUIRED)
 
+  # Ubuntu 24.04's GTSAM package exports an unavailable CppUnitLite test target.
+  # Locate only the production headers and shared library used by this package.
+  find_path(GTSAM_INCLUDE_DIR gtsam/nonlinear/ISAM2.h REQUIRED)
+  find_library(GTSAM_LIBRARY NAMES gtsam REQUIRED)
 
+  include_directories(
+    include
+    ${EIGEN3_INCLUDE_DIR}
+    ${GTSAM_INCLUDE_DIR}
+    ${PCL_INCLUDE_DIRS}
+  )
 
-include_directories(
-  ${EIGEN3_INCLUDE_DIR}
-  ${GTSAM_INCLUDE_DIR}
-  ${PCL_INCLUDE_DIRS}
-)
+  set(SRC_LIST src/pgos/commons.cpp
+               src/pgos/simple_pgo.cpp)
 
-set(SRC_LIST src/pgos/commons.cpp
-             src/pgos/simple_pgo.cpp)
+  add_executable(pgo_node src/pgo_node.cpp ${SRC_LIST})
+  ament_target_dependencies(pgo_node rclcpp std_msgs sensor_msgs nav_msgs message_filters pcl_conversions tf2_ros geometry_msgs visualization_msgs interface)
+  target_link_libraries(pgo_node ${PCL_LIBRARIES} ${GTSAM_LIBRARY} yaml-cpp)
 
-add_executable(pgo_node src/pgo_node.cpp ${SRC_LIST})
-ament_target_dependencies(pgo_node rclcpp std_msgs sensor_msgs nav_msgs message_filters pcl_conversions tf2_ros geometry_msgs visualization_msgs interface)
-target_link_libraries(pgo_node ${PCL_LIBRARIES} ${GTSAM_LIBRARY} yaml-cpp)
-
-
-install(TARGETS pgo_node DESTINATION lib/${PROJECT_NAME})
-install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
-install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
-install(DIRECTORY rviz DESTINATION share/${PROJECT_NAME})
+  install(TARGETS pgo_node DESTINATION lib/${PROJECT_NAME})
+  install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
+  install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
+  install(DIRECTORY rviz DESTINATION share/${PROJECT_NAME})
+endif()
 
 
 if(BUILD_TESTING)
@@ -73,6 +73,16 @@ if(BUILD_TESTING)
   ament_add_gtest(test_smoke test/test_smoke.cpp)
   if(TARGET test_smoke)
     ament_target_dependencies(test_smoke interface)
+  endif()
+
+  ament_add_gtest(test_latest_value_slot test/test_latest_value_slot.cpp)
+  if(TARGET test_latest_value_slot)
+    target_include_directories(test_latest_value_slot PRIVATE include)
+  endif()
+
+  ament_add_gtest(test_factor_noise test/test_factor_noise.cpp)
+  if(TARGET test_factor_noise)
+    target_include_directories(test_factor_noise PRIVATE include)
   endif()
 endif()
 
