@@ -41,17 +41,21 @@ TEST(LatestRegistration, KeepsOneInFlightAndOnlyLatestPendingWork)
       return value(1);
     }});
 
-  if (first_started_future.wait_for(std::chrono::seconds(1)) != std::future_status::ready) {
-    release_first.set_value();
-    FAIL() << "registration worker did not start within the timeout";
-  }
+  first_started_future.wait();
 
   worker.submit({2, [] {return value(2);}});
-  worker.submit({3, [] {return value(3);}});
+  std::promise<void> latest_executed;
+  auto latest_executed_future = latest_executed.get_future();
+  worker.submit({3, [&] {
+      auto result = value(3);
+      latest_executed.set_value();
+      return result;
+    }});
   EXPECT_EQ(worker.replacedCount(), 1U);
   release_first.set_value();
+  latest_executed_future.wait();
 
-  auto result = takeWithTimeout(worker, std::chrono::seconds(1));
+  auto result = takeWithTimeout(worker, std::chrono::seconds(5));
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(result->request_id, 3U);
   EXPECT_EQ(result->result.reason, "3");
@@ -62,8 +66,15 @@ TEST(LatestRegistration, ReturnsNoObsoleteResult)
 {
   localizer::LatestRegistration worker;
   worker.submit({10, [] {return value(10);}});
-  worker.submit({11, [] {return value(11);}});
-  auto result = takeWithTimeout(worker, std::chrono::seconds(1));
+  std::promise<void> latest_executed;
+  auto latest_executed_future = latest_executed.get_future();
+  worker.submit({11, [&] {
+      auto result = value(11);
+      latest_executed.set_value();
+      return result;
+    }});
+  latest_executed_future.wait();
+  auto result = takeWithTimeout(worker, std::chrono::seconds(5));
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(result->request_id, 11U);
 }

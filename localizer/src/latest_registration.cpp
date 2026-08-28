@@ -6,7 +6,11 @@
 namespace localizer
 {
 
-LatestRegistration::LatestRegistration() : worker_(&LatestRegistration::run, this) {}
+LatestRegistration::LatestRegistration()
+{
+  // Start only after every member used by run() has been initialized.
+  worker_ = std::thread(&LatestRegistration::run, this);
+}
 
 LatestRegistration::~LatestRegistration()
 {
